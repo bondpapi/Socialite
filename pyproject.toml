@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "social-agent-ai"
+version = "0.1.0"
+description = "AI social events concierge"
+authors = [{name = "You"}]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.22.0",
+    "sqlmodel>=0.0.8",
+    "httpx>=0.24.0",
+    "pydantic-settings>=0.2.0",
+    "python-dotenv>=1.0.0",
+    "apscheduler>=3.10.0",
+    "deep-translator>=1.11.4",
+    "langcodes>=3.3.0",
+    "rapidfuzz>=3.0.0"
+]
