@@ -2,81 +2,73 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from typing import List, Iterable
+import inspect
+from datetime import datetime, timedelta, timezone
+from math import asin, cos, radians, sin, sqrt
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from rapidfuzz import fuzz
 
 from ..config import settings
 
-# ---------------------------
-# Provider wiring
-PROVIDERS: list = []
+# ---------------------
+# Provider bootstrapping
+# ---------------------
 
-# Mock (useful for local testing)
-if getattr(settings, "enable_mock_provider", False):
+PROVIDERS: List[Any] = []
+
+# Optional Mock
+if getattr(settings, "enable_mock_provider", True):
     try:
         from ..providers.mock_local import MockLocalProvider
-        PROVIDERS.append(MockLocalProvider())
-    except Exception as e:
-        print(f"[INIT] MockLocalProvider not available: {e}")
 
-# SeatGeek (optional; often US-centric)
+        PROVIDERS.append(MockLocalProvider())
+    except Exception:
+        pass
+
+# Optional SeatGeek
 try:
     from ..providers.seatgeek import SeatGeekProvider as _SeatGeekProvider  # type: ignore
 except Exception:
     _SeatGeekProvider = None
 
-if _SeatGeekProvider and getattr(settings, "seatgeek_client_id", None):
-    try:
-        PROVIDERS.append(
-            _SeatGeekProvider(
-                client_id=settings.seatgeek_client_id,
-                client_secret=settings.seatgeek_client_secret,
-            )
+if _SeatGeekProvider and settings.seatgeek_client_id:
+    PROVIDERS.append(
+        _SeatGeekProvider(
+            client_id=settings.seatgeek_client_id,
+            client_secret=settings.seatgeek_client_secret,
         )
-    except Exception as e:
-        print(f"[INIT] SeatGeekProvider init failed: {e}")
+    )
 
-# Ticketmaster
+# Optional Ticketmaster
 try:
     from ..providers.ticketmaster import TicketmasterProvider as _TicketmasterProvider  # type: ignore
 except Exception:
     _TicketmasterProvider = None
 
 if _TicketmasterProvider and getattr(settings, "ticketmaster_api_key", None):
-    try:
-        PROVIDERS.append(_TicketmasterProvider(api_key=settings.ticketmaster_api_key))
-    except Exception as e:
-        print(f"[INIT] TicketmasterProvider init failed: {e}")
+    PROVIDERS.append(_TicketmasterProvider(
+        api_key=settings.ticketmaster_api_key))
 
-# Eventbrite
+# Optional Eventbrite
 try:
     from ..providers.eventbrite import EventbriteProvider as _EventbriteProvider  # type: ignore
 except Exception:
     _EventbriteProvider = None
 
 if _EventbriteProvider and getattr(settings, "eventbrite_token", None):
-    try:
-        PROVIDERS.append(_EventbriteProvider(token=settings.eventbrite_token))
-    except Exception as e:
-        print(f"[INIT] EventbriteProvider init failed: {e}")
+    PROVIDERS.append(_EventbriteProvider(token=settings.eventbrite_token))
 
-# ICS feeds
+# Optional ICS feeds
 try:
     from ..providers.icsfeed import ICSFeedProvider as _ICSFeedProvider  # type: ignore
 except Exception:
     _ICSFeedProvider = None
 
-if _ICSFeedProvider and getattr(settings, "ics_urls", None):
-    try:
-        urls = list(getattr(settings, "ics_urls", []) or [])
-        if urls:
-            PROVIDERS.append(_ICSFeedProvider(urls))
-    except Exception as e:
-        print(f"[INIT] ICSFeedProvider init failed: {e}")
+if _ICSFeedProvider and settings.ics_urls:
+    PROVIDERS.append(_ICSFeedProvider(settings.ics_urls))
 
-# Web discovery (Tavily-backed)
+# Optional Web Discovery (Tavily)
 try:
     from ..providers.web_discovery import WebDiscoveryProvider as _WebDiscoveryProvider  # type: ignore
 except Exception:
@@ -84,166 +76,244 @@ except Exception:
 
 if (
     _WebDiscoveryProvider
-    and getattr(settings, "enable_web_discovery", False)
-    and getattr(settings, "tavily_api_key", None)
+    and settings.enable_web_discovery
+    and settings.tavily_api_key
 ):
-    try:
-        PROVIDERS.append(
-            _WebDiscoveryProvider(
-                tavily_key=settings.tavily_api_key,
-                allow_domains=(getattr(settings, "discovery_domains", None) or None),
-                max_pages=12,
-            )
+    PROVIDERS.append(
+        _WebDiscoveryProvider(
+            tavily_key=settings.tavily_api_key,
+            allow_domains=settings.discovery_domains or None,
+            max_pages=12,
         )
-    except Exception as e:
-        print(f"[INIT] WebDiscoveryProvider init failed: {e}")
+    )
 
-# ---------------------------
+
+# ---------------------
 # Helpers
-# ---------------------------
-
-CITY_ALIASES = {
-    "vilnius": {"vilnius", "vilniaus"},
-    "kaunas": {"kaunas", "kauno"},
-    "klaipėda": {"klaipėda", "klaipeda", "klaipedos"},
-    "šiauliai": {"šiauliai", "siauliai"},
-    "panevėžys": {"panevėžys", "panevezys"},
-    "tallinn": {"tallinn", "tallinna"},
-    "riga": {"rīga", "riga"},
-    "berlin": {"berlin"},
-}
+# ---------------------
 
 
-def _infer_city_from_text(text: str, fallback: str | None = None) -> str | None:
-    t = (text or "").lower()
-    for city, variants in CITY_ALIASES.items():
-        if any(v in t for v in variants):
-            return city.capitalize()
-    return fallback
+def _parse_iso_dt(val: Optional[str]) -> Optional[datetime]:
+    if not val:
+        return None
+    try:
+        # handle ...Z
+        if val.endswith("Z"):
+            val = val.replace("Z", "+00:00")
+        return datetime.fromisoformat(val)
+    except Exception:
+        return None
 
 
-def _likely_in_city(item: dict, city: str) -> bool:
-    """Loose check if the requested city appears anywhere in the record."""
-    blob = " ".join(
-        [
-            item.get("title", "") or "",
-            item.get("venue_name", "") or "",
-            item.get("city", "") or "",
-            item.get("url", "") or "",
-            item.get("category", "") or "",
-        ]
-    ).lower()
-    return city.lower() in blob
+def _price_to_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except Exception:
+        return None
 
 
-def _as_iter(obj) -> Iterable:
-    if not obj:
-        return []
-    if isinstance(obj, (list, tuple)):
-        return obj
-    return [obj]
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    # Earth radius in km
+    R = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * \
+        cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * asin(sqrt(a))
+    return R * c
 
 
-def _sort_key(item: dict):
-    # Prefer items with start_time; otherwise 0
-    st = item.get("start_time")
-    if not st:
-        return (1, "")
-    return (0, st)
+def _supports_kwargs(fn: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter kwargs to only those the provider's search() supports."""
+    try:
+        sig = inspect.signature(fn)
+        keep = {}
+        for name, param in sig.parameters.items():
+            if name in payload:
+                keep[name] = payload[name]
+        return keep
+    except Exception:
+        # Fallback: pass the minimal core fields only
+        base = {
+            k: v
+            for k, v in payload.items()
+            if k in {"city", "country", "start", "end", "query"}
+        }
+        return base
 
 
-# ---------------------------
-# Public: active provider names
-# ---------------------------
+# ---------------------
+# Core search
+# ---------------------
 
-def list_providers() -> list[str]:
-    return [p.__class__.__name__ for p in PROVIDERS]
 
-# Public: main search
 async def search_events(
     *,
     city: str,
     country: str,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    query: str | None = None,
-) -> List[dict]:
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    query: Optional[str] = None,
+    # New filters
+    category: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+    radius_km: Optional[int] = None,
+    city_lat: Optional[float] = None,
+    city_lon: Optional[float] = None,
+    sort: str = "date",  # "date" | "price" | "price_desc"
+    include_mock: bool = True,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     """
-    Fan out to all configured providers, then:
-      - prefer real sources (Ticketmaster/Eventbrite) if present
-      - fill missing city from text
-      - filter to requested city
-      - dedupe by URL first, then fuzzy-title/venue
-      - sort (events with dates first)
-    """
+    Returns (items, provider_errors)
 
-    async def _run_provider(p):
+    Each item should match the normalized schema fields we use in the UI:
+    {
+      "source": "ticketmaster" | "eventbrite" | "web" | "mock" | ...,
+      "external_id": "...",
+      "title": "...",
+      "category": "...",
+      "start_time": "ISO8601",
+      "city": "Vilnius",
+      "country": "LT",
+      "venue_name": "...",
+      "min_price": 20.0 or None,
+      "currency": "EUR",
+      "url": "https://..."
+      # optional: "latitude","longitude"
+    }
+    """
+    provider_errors: List[Dict[str, str]] = []
+
+    # Build a common payload; we'll filter per provider via signature
+    base_payload: Dict[str, Any] = dict(
+        city=city, country=country, start=start, end=end, query=query
+    )
+
+    async def _call_provider(p: Any) -> List[Dict[str, Any]]:
         try:
-            return await p.search(city=city, country=country, start=start, end=end, query=query)
+            kw = _supports_kwargs(p.search, base_payload)
+            items = await p.search(**kw)  # type: ignore
+            return items or []
         except Exception as e:
-            print(f"Provider {p.__class__.__name__} error: {e}")
+            provider_errors.append(
+                {"provider": p.__class__.__name__, "message": str(e)}
+            )
             return []
 
-    results: list[dict] = []
-    if not PROVIDERS:
-        return results
-
     # Run providers concurrently
-    batches = await asyncio.gather(*[_run_provider(p) for p in PROVIDERS], return_exceptions=False)
-    for b in batches:
-        results.extend(_as_iter(b))
+    results_nested = await asyncio.gather(*[_call_provider(p) for p in PROVIDERS])
+    results: List[Dict[str, Any]] = [
+        it for sub in results_nested for it in sub]
 
-    # Prefer real sources if any exist
-    REAL_SOURCES = {"ticketmaster", "eventbrite"}  # extend later if needed
-    real = [e for e in results if (e.get("source") or "").lower() in REAL_SOURCES]
+    # Optionally drop mock
+    if not include_mock:
+        results = [x for x in results if (
+            x.get("source") or "").lower() != "mock"]
+
+    # Prefer real sources if any are present
+    REAL_SOURCES = {"ticketmaster", "eventbrite", "seatgeek"}
+    real = [e for e in results if (
+        e.get("source") or "").lower() in REAL_SOURCES]
     if real:
         results = real
 
-    # Fill missing city from text
-    enriched = []
-    for e in results:
-        if not e.get("city"):
-            inferred = _infer_city_from_text(
-                " ".join([e.get("title", "") or "", e.get("venue_name", "") or "", e.get("url", "") or ""]),
-                fallback=None,
+    # ---------
+    # Filtering
+    # ---------
+    if category:
+        cat_l = category.strip().lower()
+        results = [
+            r
+            for r in results
+            if (
+                (r.get("category") and cat_l in str(r["category"]).lower())
+                or (cat_l in str(r.get("title", "")).lower())
             )
-            if inferred:
-                e["city"] = inferred
-        enriched.append(e)
-    results = enriched
+        ]
 
-    # Keep items that are clearly for the requested city
-    results = [
-        e
-        for e in results
-        if (e.get("city") and e["city"].lower() == city.lower()) or _likely_in_city(e, city)
-    ]
-
-    # Drop entries without a title or url (usually low-signal web results)
-    results = [e for e in results if (e.get("title") or "").strip()]
-
-    # URL-first dedupe
-    seen_urls = set()
-    url_deduped: list[dict] = []
-    for it in results:
-        u = (it.get("url") or "").strip()
-        if u:
-            if u in seen_urls:
+    if (min_price is not None) or (max_price is not None):
+        filtered: List[Dict[str, Any]] = []
+        for r in results:
+            price = _price_to_float(r.get("min_price"))
+            if price is None:
+                # If price unknown, keep it (or set a policy to drop). We'll keep.
+                filtered.append(r)
                 continue
-            seen_urls.add(u)
-        url_deduped.append(it)
-    results = url_deduped
+            if (min_price is not None and price < float(min_price)) or (
+                max_price is not None and price > float(max_price)
+            ):
+                continue
+            filtered.append(r)
+        results = filtered
 
-    # Fuzzy title/venue dedupe
-    deduped: list[dict] = []
+    if radius_km and city_lat is not None and city_lon is not None:
+        within: List[Dict[str, Any]] = []
+        for r in results:
+            lat = r.get("latitude") or r.get("lat")
+            lon = r.get("longitude") or r.get("lon")
+            if lat is None or lon is None:
+                # keep if unknown coordinates
+                within.append(r)
+                continue
+            try:
+                d = _haversine_km(float(city_lat), float(
+                    city_lon), float(lat), float(lon))
+                if d <= float(radius_km):
+                    within.append(r)
+            except Exception:
+                within.append(r)
+        results = within
+
+    # -------------
+    # De-duplication
+    # -------------
+    #
+    # Rules:
+    # - fuzzy title similarity > 85 AND same venue -> dup
+    # - If dates exist, require within ±1 day window
+    #
+    deduped: List[Dict[str, Any]] = []
     for item in results:
-        if not any(
-            fuzz.token_set_ratio(item.get("title", ""), d.get("title", "")) > 90
-            and ((item.get("venue_name") or "").strip() == (d.get("venue_name") or "").strip())
-            for d in deduped
-        ):
+        t = (item.get("title") or "").strip()
+        venue = (item.get("venue_name") or "").strip()
+        dt = _parse_iso_dt(item.get("start_time"))
+        is_dup = False
+        for d in deduped:
+            t2 = (d.get("title") or "").strip()
+            venue2 = (d.get("venue_name") or "").strip()
+            score = fuzz.token_set_ratio(t, t2)
+            if score >= 85 and venue and venue2 and venue == venue2:
+                # Check date proximity if both present
+                dt2 = _parse_iso_dt(d.get("start_time"))
+                if (dt and dt2 and abs((dt - dt2).days) <= 1) or (dt is None or dt2 is None):
+                    is_dup = True
+                    break
+        if not is_dup:
             deduped.append(item)
+    results = deduped
 
-    # Sort: with date first, then by start_time asc
-    deduped.sort(key=_sort_key)
-    return deduped
+    # -----
+    # Sort
+    # -----
+    sort_key = (sort or "date").lower()
+    if sort_key == "price":
+        results.sort(
+            key=lambda r: (_price_to_float(r.get("min_price"))
+                           is None, _price_to_float(r.get("min_price")) or 0.0)
+        )
+    elif sort_key == "price_desc":
+        results.sort(
+            key=lambda r: (_price_to_float(r.get("min_price"))
+                           is None, -(_price_to_float(r.get("min_price")) or 0.0))
+        )
+    else:
+        # default by date ascending
+        results.sort(
+            key=lambda r: (_parse_iso_dt(r.get("start_time")) is None, _parse_iso_dt(
+                r.get("start_time")) or datetime.max.replace(tzinfo=timezone.utc))
+        )
+
+    return results, provider_errors
