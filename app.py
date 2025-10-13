@@ -1,151 +1,246 @@
-# ui/app.py
-import os
+# social_agent_ai/ui/app.py
+from __future__ import annotations
+
+import io
 import json
-from typing import Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 import pandas as pd
 import requests
 import streamlit as st
 
-# ----------------------------
-# Basic page setup
-# ----------------------------
+# local storage helpers
+from social_agent_ai.services import storage
+
+API_BASE = "http://127.0.0.1:8000"
+
 st.set_page_config(page_title="Socialite", layout="wide")
-st.title("Socialite")
-
-API_BASE = os.getenv("SOCIALITE_API_BASE", "http://127.0.0.1:8000")
 
 
-# ----------------------------
-# Small client helper
-# ----------------------------
-def api_get(path: str, params: dict) -> dict:
-    url = f"{API_BASE.rstrip('/')}/{path.lstrip('/')}"
-    r = requests.get(url, params=params, timeout=30)
+# -------- helpers --------
+def api_get(path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    url = f"{API_BASE}{path}"
+    r = requests.get(url, params=params or {}, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
-def search_events(
-    *,
+def api_search(
     city: str,
     country: str,
     days_ahead: int,
     start_in_days: int,
     include_mock: bool,
-    query: Optional[str],
-    debug: bool = False,
-) -> dict:
-    params = dict(
-        city=city,
-        country=country,
-        days_ahead=days_ahead,
-        start_in_days=start_in_days,
-        include_mock=str(include_mock).lower(),
-        debug=str(bool(debug)).lower(),
-    )
+    query: str | None,
+) -> Dict[str, Any]:
+    params = {
+        "city": city,
+        "country": country,
+        "days_ahead": days_ahead,
+        "start_in_days": start_in_days,
+        "include_mock": str(include_mock).lower(),
+    }
     if query:
         params["query"] = query
-    return api_get("/events/search", params)
+
+    return api_get("/events/search", params=params)
 
 
-# ----------------------------
-# Sidebar controls
-# ----------------------------
-st.sidebar.header("Search filters")
+def clean_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # ensure we always have consistent fields for display/export
+    cleaned = []
+    for e in items:
+        cleaned.append(
+            {
+                "source": e.get("source"),
+                "external_id": e.get("external_id"),
+                "title": e.get("title") or "Untitled",
+                "category": e.get("category"),
+                "start_time": e.get("start_time"),
+                "city": e.get("city"),
+                "country": e.get("country"),
+                "venue_name": e.get("venue_name"),
+                "min_price": e.get("min_price"),
+                "currency": e.get("currency"),
+                "url": e.get("url"),
+            }
+        )
+    return cleaned
 
-city = st.sidebar.text_input("City", value=os.getenv("DEFAULT_CITY", "Vilnius"))
-country = st.sidebar.text_input("Country (ISO-2)", value=os.getenv("DEFAULT_COUNTRY", "LT"))
-days_ahead = st.sidebar.slider("Days ahead", min_value=1, max_value=180, value=90, step=1)
-start_in_days = st.sidebar.slider("Start in days", min_value=0, max_value=60, value=0, step=1)
-query = st.sidebar.text_input("Query (optional)", value="")
-include_mock = st.sidebar.toggle("Include mock provider", value=False)
-show_debug = st.sidebar.toggle("Show provider debug", value=False)
 
-run = st.sidebar.button("Search", type="primary")
+def to_csv_bytes(items: List[Dict[str, Any]]) -> bytes:
+    df = pd.DataFrame(items)
+    return df.to_csv(index=False).encode("utf-8")
 
-# Keep last results across reruns
-if "last_results" not in st.session_state:
-    st.session_state.last_results = None
 
-# ----------------------------
-# Main area
-# ----------------------------
-tab1, tab2 = st.tabs(["Discover", "Providers"])
+def event_subtitle(e: Dict[str, Any]) -> str:
+    parts = []
+    if e.get("venue_name"):
+        parts.append(e["venue_name"])
+    if e.get("city") or e.get("country"):
+        parts.append(", ".join([p for p in [e.get("city"), e.get("country")] if p]))
+    if e.get("start_time"):
+        parts.append(e["start_time"])
+    return " • ".join(parts)
 
-with tab1:
-    st.write("Use the filters in the left sidebar, then click **Search**.")
+
+def _event_key(e: Dict[str, Any]) -> str:
+    ext = e.get("external_id") or ""
+    title = e.get("title") or ""
+    start = e.get("start_time") or ""
+    venue = e.get("venue_name") or ""
+    return f"{ext}|{title}|{start}|{venue}".strip()
+
+
+# -------- sidebar controls --------
+st.title("Socialite")
+
+with st.sidebar:
+    st.subheader("Search")
+    col1, col2 = st.columns(2)
+    with col1:
+        city = st.text_input("City", value=st.session_state.get("city", "Vilnius"))
+    with col2:
+        country = st.text_input("Country (ISO-2)", value=st.session_state.get("country", "LT"))
+
+    col3, col4 = st.columns(2)
+    with col3:
+        start_in_days = st.number_input("Start in (days)", min_value=0, max_value=365, value=0)
+    with col4:
+        days_ahead = st.number_input("Days ahead", min_value=1, max_value=365, value=90)
+
+    query = st.text_input("Keyword (optional)", value="")
+    include_mock = st.checkbox("Include mock data", value=False)
+
+    run = st.button("🔎 Search", use_container_width=True)
+
+tabs = st.tabs(["Discover", "Saved ⭐", "Settings"])
+
+
+# -------- Discover --------
+with tabs[0]:
+    st.write("Use the filters in the sidebar, then click **Search**.")
 
     if run:
-        with st.spinner("Finding events..."):
+        st.session_state["city"] = city
+        st.session_state["country"] = country
+
+        with st.spinner("Finding events…"):
             try:
-                data = search_events(
+                data = api_search(
                     city=city,
                     country=country,
-                    days_ahead=days_ahead,
-                    start_in_days=start_in_days,
-                    include_mock=include_mock,
+                    days_ahead=int(days_ahead),
+                    start_in_days=int(start_in_days),
+                    include_mock=bool(include_mock),
                     query=query or None,
-                    debug=show_debug,
                 )
-                st.session_state.last_results = data
-            except Exception as e:
-                st.error(f"Search failed: {e}")
-                st.stop()
+                items = clean_items(data.get("items", []))
+                st.session_state.last_results = items
+                count = data.get("count", len(items))
+                st.success(f"Found {count} event(s) for **{data.get('city', city)}**, **{data.get('country', country)}**.")
+            except requests.HTTPError as http_err:
+                st.error(f"API error: {http_err}")
+                items = []
+            except Exception as err:
+                st.error(f"Unexpected error: {err}")
+                items = []
 
-    data = st.session_state.last_results
-    if not data:
-        st.info("No search yet. Pick filters and press **Search**.")
-    else:
-        count = data.get("count", 0)
-        st.success(
-            f"Found **{count}** event(s) for **{data.get('city', city)}**, {data.get('country', country)}."
-        )
-
-        # Debug diagnostics (if requested)
-        if show_debug and "debug" in data and data["debug"]:
-            with st.expander("Provider diagnostics", expanded=False):
-                df = pd.DataFrame(data["debug"])
-                cols = [c for c in ["provider", "ok", "count", "ms", "error"] if c in df.columns]
-                st.dataframe(df[cols] if cols else df, use_container_width=True)
-
-        items = data.get("items", [])
         if not items:
-            st.info("No events matched. Try broadening your search.")
+            st.info("No events matched. Try broadening search or increasing the date range.")
         else:
-            # Download CSV
+            # top controls: download CSV + small help
             left, right = st.columns([1, 1])
             with left:
                 st.download_button(
                     "Download CSV",
-                    data=pd.DataFrame(items).to_csv(index=False).encode("utf-8"),
+                    data=to_csv_bytes(items),
                     file_name="socialite_events.csv",
                     mime="text/csv",
                 )
             with right:
-                st.caption("Click a card’s ⭐ to save it. (UI stub)")
+                st.caption("Click a card’s ⭐ to save it to your **Saved** tab.")
 
-            # Render simple cards
-            for e in items:
-                with st.container(border=True):
-                    top = st.columns([0.85, 0.15])
-                    with top[0]:
-                        st.subheader(e.get("title", "Untitled"))
-                        meta = []
-                        if e.get("start_time"):
-                            meta.append(f"🗓 {e['start_time']}")
-                        if e.get("venue_name"):
-                            meta.append(f"📍 {e['venue_name']}")
-                        st.write(" • ".join(meta))
-                        if e.get("url"):
-                            st.link_button("Open", e["url"])
-                    with top[1]:
-                        st.button("⭐ Save", key=f"save::{e.get('external_id', id(e))}")
+            # render cards in a responsive grid
+            cols = st.columns(2)
+            for idx, e in enumerate(items):
+                c = cols[idx % 2]
+                with c.container(border=True):
+                    st.subheader(e["title"])
+                    st.write(event_subtitle(e))
+                    if e.get("url"):
+                        st.link_button("Open", e["url"])
+                    # actions
+                    a1, a2, a3 = st.columns([1, 1, 1])
+                    with a1:
+                        if st.button("⭐ Save", key=f"save::{_event_key(e)}"):
+                            storage.add_item(e)
+                            st.toast("Saved!", icon="⭐")
+                    with a2:
+                        min_price = e.get("min_price")
+                        currency = e.get("currency")
+                        if min_price is not None and currency:
+                            st.write(f"From {min_price} {currency}")
+                        else:
+                            st.write("Price: N/A")
+                    with a3:
+                        st.write(f"Source: {e.get('source') or 'web'}")
 
-with tab2:
+
+# -------- Saved --------
+with tabs[1]:
+    saved = storage.list_items()
+    st.subheader(f"Saved events ({len(saved)})")
+
+    if not saved:
+        st.info("No saved events yet. Go to **Discover** and click ⭐.")
+    else:
+        top_l, top_r = st.columns([1, 1])
+        with top_l:
+            st.download_button(
+                "Download Saved as CSV",
+                data=to_csv_bytes(saved),
+                file_name="socialite_saved.csv",
+                mime="text/csv",
+            )
+        with top_r:
+            if st.button("🗑️ Clear All", type="primary"):
+                storage.clear_all()
+                st.rerun()
+
+        cols = st.columns(2)
+        for idx, e in enumerate(saved):
+            c = cols[idx % 2]
+            with c.container(border=True):
+                st.subheader(e.get("title") or "Untitled")
+                st.write(event_subtitle(e))
+                if e.get("url"):
+                    st.link_button("Open", e["url"])
+                # actions
+                a1, a2 = st.columns([1, 1])
+                with a1:
+                    if st.button("Remove", key=f"remove::{_event_key(e)}"):
+                        storage.remove_item(e)
+                        st.rerun()
+                with a2:
+                    st.write(f"Source: {e.get('source') or 'web'}")
+
+
+# -------- Settings --------
+with tabs[2]:
+    st.subheader("Providers")
     try:
-        providers = api_get("/events/providers", params={})
-        df = pd.DataFrame({"providers": providers.get("providers", [])})
-        st.dataframe(df, use_container_width=True, height=250)
+        providers = api_get("/events/providers").get("providers", [])
+        if providers:
+            st.write(", ".join(providers))
+        else:
+            st.write("No providers reported.")
     except Exception as e:
-        st.error(f"Failed to load providers: {e}")
+        st.error(f"Could not fetch providers: {e}")
+
+    st.divider()
+    st.caption(
+        "Saved items are stored at "
+        f"`{storage.SAVED_PATH}` – handy if you want to back them up or inspect them."
+    )
