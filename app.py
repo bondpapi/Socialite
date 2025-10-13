@@ -1,19 +1,49 @@
 # social_agent_ai/ui/app.py
 from __future__ import annotations
 
-import io
-import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, List
+import os
+import sys
+from pathlib import Path
 
+# --- Make imports robust no matter where this file is executed from ---
+# Tries:
+#   - installed package "social_agent_ai"
+#   - repo layout when running "streamlit run social_agent_ai/ui/app.py"
+#   - copied/flat layouts (e.g., Streamlit Cloud folder named "socialite/")
+try:
+    from social_agent_ai.services import storage  # type: ignore
+except ModuleNotFoundError:
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2],         # repo root: .../social_agent_ai/ui/app.py -> repo/
+        here.parents[1],         # .../ui/
+        Path.cwd(),              # current working directory
+    ]
+    for base in candidates:
+        pkg_root = base / "social_agent_ai"
+        if pkg_root.exists():
+            sys.path.insert(0, str(base))
+            break
+    try:
+        from social_agent_ai.services import storage  # type: ignore
+    except ModuleNotFoundError:
+        # final fallbacks for flat copies (services next to app.py)
+        local_services = here.parent.parent / "services"
+        if local_services.exists():
+            sys.path.insert(0, str(local_services.parent))
+        try:
+            from services import storage  # type: ignore
+        except Exception as e:
+            raise
+
+import streamlit as st
 import pandas as pd
 import requests
-import streamlit as st
-
-# local storage helpers
-from social_agent_ai.services import storage
+from typing import Any, Dict, List
+from datetime import datetime, timedelta
 
 API_BASE = "http://127.0.0.1:8000"
+
 
 st.set_page_config(page_title="Socialite", layout="wide")
 
