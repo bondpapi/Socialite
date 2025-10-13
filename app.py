@@ -42,8 +42,14 @@ import requests
 from typing import Any, Dict, List
 from datetime import datetime, timedelta
 
-API_BASE = "http://127.0.0.1:8000"
 
+def _get_api_base() -> str:
+    # Prefer Streamlit secrets (Cloud), then ENV, then local default
+    if hasattr(st, "secrets") and "API_BASE" in st.secrets:
+        return st.secrets["API_BASE"].rstrip("/")
+    return os.environ.get("API_BASE", "http://127.0.0.1:8000").rstrip("/")
+
+API_BASE = _get_api_base()
 
 st.set_page_config(page_title="Socialite", layout="wide")
 
