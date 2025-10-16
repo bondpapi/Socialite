@@ -6,10 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Socialite", version="0.1.0")
 
-# allow your Streamlit app (or temporarily "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # or ["https://your-streamlit-app.streamlit.app"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

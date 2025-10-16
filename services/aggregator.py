@@ -1,145 +1,103 @@
-# social_agent_ai/services/aggregator.py
 from __future__ import annotations
 
-import time
-from datetime import datetime
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Optional
+import logging
 
-from rapidfuzz import fuzz
-from ..config import settings
+from social_agent_ai.config import settings
+from social_agent_ai.utils.http_client import HttpClient
+from social_agent_ai.providers import eventbrite as eventbrite_provider
+from social_agent_ai.services import web_discovery as web_discovery_service
 
-PROVIDERS: list = []
+logger = logging.getLogger(__name__)
 
-# Optional mock
-if settings.enable_mock_provider:
-    try:
-        from ..providers.mock_local import MockLocalProvider
-        PROVIDERS.append(MockLocalProvider())
-    except Exception:
-        pass
 
-# Optional SeatGeek
-try:
-    from ..providers.seatgeek import SeatGeekProvider as _SeatGeekProvider  # type: ignore
-except Exception:
-    _SeatGeekProvider = None
-
-if _SeatGeekProvider and settings.seatgeek_client_id:
-    PROVIDERS.append(
-        _SeatGeekProvider(
-            client_id=settings.seatgeek_client_id,
-            client_secret=settings.seatgeek_client_secret,
-        )
-    )
-
-# Optional Ticketmaster
-try:
-    from ..providers.ticketmaster import TicketmasterProvider as _TicketmasterProvider  # type: ignore
-except Exception:
-    _TicketmasterProvider = None
-
-if _TicketmasterProvider and getattr(settings, "ticketmaster_api_key", None):
-    PROVIDERS.append(_TicketmasterProvider(api_key=settings.ticketmaster_api_key))
-
-# Optional Eventbrite
-try:
-    from ..providers.eventbrite import EventbriteProvider as _EventbriteProvider  # type: ignore
-except Exception:
-    _EventbriteProvider = None
-
-if _EventbriteProvider and getattr(settings, "eventbrite_token", None):
-    PROVIDERS.append(_EventbriteProvider(token=settings.eventbrite_token))
-
-# Optional ICS feeds
-try:
-    from ..providers.icsfeed import ICSFeedProvider as _ICSFeedProvider  # type: ignore
-except Exception:
-    _ICSFeedProvider = None
-
-if _ICSFeedProvider and settings.ics_urls:
-    PROVIDERS.append(_ICSFeedProvider(settings.ics_urls))
-
-# Optional Web Discovery (Tavily)
-try:
-    from ..providers.web_discovery import WebDiscoveryProvider as _WebDiscoveryProvider  # type: ignore
-except Exception:
-    _WebDiscoveryProvider = None
-
-if (
-    _WebDiscoveryProvider
-    and settings.enable_web_discovery
-    and settings.tavily_api_key
-):
-    PROVIDERS.append(
-        _WebDiscoveryProvider(
-            tavily_key=settings.tavily_api_key,
-            allow_domains=settings.discovery_domains or None,
-            max_pages=12,
-        )
+def _client() -> HttpClient:
+    return HttpClient(
+        timeout=settings.http_timeout_seconds,
+        max_retries=settings.http_max_retries,
+        user_agent="Socialite/1.0 (+https://example.com)",
     )
 
 
-def list_providers() -> List[str]:
-    return [p.__class__.__name__ for p in PROVIDERS]
-
-
-async def search_events(
+def search_events(
     *,
     city: str,
     country: str,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    query: str | None = None,
-    debug: bool = False,
-) -> Tuple[List[dict], List[Dict[str, Any]]]:
+    start_in_days: int,
+    days_ahead: int,
+    include_mock: bool = False,
+    query: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Returns (items, diagnostics)
-    diagnostics: list of {provider, ms, ok, count, error?}
+    Fan out to providers, merge & dedupe lightly.
+    All provider calls use retries + timeouts under the hood.
     """
-    results: list[dict] = []
-    diag: list[Dict[str, Any]] = []
+    client = _client()
+    items: List[Dict[str, Any]] = []
 
-    for p in PROVIDERS:
-        t0 = time.perf_counter()
-        name = p.__class__.__name__
-        ok = True
-        count = 0
-        err = None
+    # 1) Eventbrite
+    try:
+        ev = eventbrite_provider.search(
+            client=client,
+            token=settings.eventbrite_token,
+            city=city,
+            country=country,
+            start_in_days=start_in_days,
+            days_ahead=days_ahead,
+            keyword=query,
+        )
+        items.extend(ev)
+    except Exception as e:
+        logger.info("Eventbrite provider error: %s", e)
+
+    # 2) Web discovery (optional)
+    if settings.enable_web_discovery:
         try:
-            items = await p.search(
-                city=city, country=country, start=start, end=end, query=query
+            wd = web_discovery_service.crawl_sites(
+                client=client,
+                city=city,
+                country=country,
+                allow_domains=settings.discovery_domains or None,
+                keyword=query,
+                limit_per_site=25,
             )
-            count = len(items)
-            results.extend(items)
+            items.extend(wd)
         except Exception as e:
-            ok = False
-            err = f"{type(e).__name__}: {e}"
-        finally:
-            ms = round((time.perf_counter() - t0) * 1000.0, 1)
-            diag.append(
+            logger.info("Web discovery error: %s", e)
+
+    # 3) Mock (optional)
+    if include_mock and not items:
+        items.extend(
+            [
                 {
-                    "provider": name,
-                    "ms": ms,
-                    "ok": ok,
-                    "count": count,
-                    **({"error": err} if err else {}),
+                    "source": "mock",
+                    "external_id": "mock-001",
+                    "title": f"Sample show in {city}",
+                    "category": "Event",
+                    "start_time": None,
+                    "city": city,
+                    "country": country,
+                    "venue_name": "TBD",
+                    "min_price": None,
+                    "currency": None,
+                    "url": None,
                 }
-            )
+            ]
+        )
 
-    # Prefer real sources if any are present
-    REAL_SOURCES = {"ticketmaster", "eventbrite"}
-    real = [e for e in results if e.get("source") in REAL_SOURCES]
-    if real:
-        results = real
+    # small dedupe by (source, external_id) or URL
+    seen: set[tuple[str, str]] = set()
+    deduped: List[Dict[str, Any]] = []
+    for it in items:
+        key = (it.get("source") or "", (it.get("external_id") or it.get("url") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(it)
 
-    # naive dedupe by title+venue
-    deduped: list[dict] = []
-    for item in results:
-        if not any(
-            fuzz.token_set_ratio(item.get("title", ""), d.get("title", "")) > 90
-            and (item.get("venue_name") == d.get("venue_name"))
-            for d in deduped
-        ):
-            deduped.append(item)
-
-    return (deduped, diag if debug else [])
+    return {
+        "city": city,
+        "country": country,
+        "count": len(deduped),
+        "items": deduped,
+    }

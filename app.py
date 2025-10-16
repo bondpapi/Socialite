@@ -1,282 +1,352 @@
-# social_agent_ai/ui/app.py
 from __future__ import annotations
 
+import hashlib
 import os
-import sys
-from pathlib import Path
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
-# --- Make imports robust no matter where this file is executed from ---
-# Tries:
-#   - installed package "social_agent_ai"
-#   - repo layout when running "streamlit run social_agent_ai/ui/app.py"
-#   - copied/flat layouts (e.g., Streamlit Cloud folder named "socialite/")
-try:
-    from social_agent_ai.services import storage  # type: ignore
-except ModuleNotFoundError:
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parents[2],         # repo root: .../social_agent_ai/ui/app.py -> repo/
-        here.parents[1],         # .../ui/
-        Path.cwd(),              # current working directory
-    ]
-    for base in candidates:
-        pkg_root = base / "social_agent_ai"
-        if pkg_root.exists():
-            sys.path.insert(0, str(base))
-            break
-    try:
-        from social_agent_ai.services import storage  # type: ignore
-    except ModuleNotFoundError:
-        # final fallbacks for flat copies (services next to app.py)
-        local_services = here.parent.parent / "services"
-        if local_services.exists():
-            sys.path.insert(0, str(local_services.parent))
-        try:
-            from services import storage  # type: ignore
-        except Exception as e:
-            raise
-
-import streamlit as st
 import pandas as pd
 import requests
-from typing import Any, Dict, List
-from datetime import datetime, timedelta
+import streamlit as st
+from datetime import datetime
 
+from social_agent_ai.services.storage import get_store
+
+
+# ===============================
+# Config & lightweight helpers
+# ===============================
 
 def _get_api_base() -> str:
-    # Prefer Streamlit secrets (Cloud), then ENV, then local default
+    """Secrets -> ENV -> localhost fallback"""
     if hasattr(st, "secrets") and "API_BASE" in st.secrets:
-        return st.secrets["API_BASE"].rstrip("/")
-    return os.environ.get("API_BASE", "http://127.0.0.1:8000").rstrip("/")
+        return str(st.secrets["API_BASE"]).rstrip("/")
+    env_val = os.environ.get("API_BASE")
+    if env_val:
+        return env_val.rstrip("/")
+    return "http://127.0.0.1:8000"
 
-API_BASE = _get_api_base()
+
+def _stable_id(rec: Dict[str, Any]) -> str:
+    src = f"{rec.get('source','')}-{rec.get('external_id','')}-{rec.get('title','')}-{rec.get('start_time','')}"
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()
+
+
+def _human_time(iso: Optional[str]) -> str:
+    if not iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.strftime("%b %d, %Y · %H:%M")
+    except Exception:
+        return iso
+
+
+def _pretty_source(source: Optional[str]) -> str:
+    if not source:
+        return "unknown"
+    # normalize simple web domains
+    s = source.replace("https://", "").replace("http://", "").rstrip("/")
+    if s.startswith("web:"):
+        s = s.split(":", 1)[1]
+    return s
+
+
+# ===============================
+# HTTP with retry/backoff
+# ===============================
+
+def _classify_error(e: Exception) -> Tuple[str, str]:
+    """return (title, body) for UI"""
+    if isinstance(e, requests.HTTPError):
+        status = e.response.status_code if e.response is not None else "?"
+        url = getattr(e.response, "url", "")
+        if status == 404:
+            return ("404 Not Found",
+                    f"Endpoint not found at **{url}**. Check API base URL in **Settings**.")
+        if status in (500, 502, 503, 504):
+            return (f"{status} Server error",
+                    "The API is temporarily unavailable. Try again in a moment.")
+        return (f"HTTP {status}", f"{e}")
+    if isinstance(e, requests.Timeout):
+        return ("Timeout", "The request took too long. Try again or narrow your search.")
+    if isinstance(e, requests.ConnectionError):
+        return ("Connection error",
+                "Could not reach the API. Is it running, and is your **API base** correct?")
+    return ("Unexpected error", f"{e}")
+
+
+def _api_get_retry(
+    url: str,
+    params: Dict[str, Any],
+    *,
+    attempts: int = 3,
+    timeout: int = 20,
+    backoff: float = 0.75,
+) -> Dict[str, Any]:
+    last: Optional[Exception] = None
+    for i in range(1, attempts + 1):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            if i >= attempts:
+                break
+            time.sleep(backoff * i)
+    assert last is not None
+    raise last
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def _api_get(api_base: str, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{api_base.rstrip('/')}/{path.lstrip('/')}"
+    return _api_get_retry(url, params)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _get_providers(api_base: str) -> List[str]:
+    """
+    Ask the API for a list of web discovery domains / providers.
+    Falls back to a small default list if endpoint is missing.
+    """
+    try:
+        data = _api_get(api_base, "/events/providers", {})
+        # Expect: {"web": ["bilietai.lt", ...], "apis": ["ticketmaster", ...]} OR simple list
+        if isinstance(data, dict):
+            # merge any lists we find
+            doms: List[str] = []
+            for v in data.values():
+                if isinstance(v, list):
+                    doms.extend([str(x) for x in v])
+            return sorted(set(doms))
+        if isinstance(data, list):
+            return sorted({str(x) for x in data})
+    except Exception:
+        pass
+    # Fallback defaults (safe to ignore if API doesn't support)
+    return ["bilietai.lt", "piletilevi.ee", "bilesuserviss.lv", "tiketa.lt"]
+
+
+# ===============================
+# Streamlit state & chrome
+# ===============================
 
 st.set_page_config(page_title="Socialite", layout="wide")
 
-
-# -------- helpers --------
-def api_get(path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    url = f"{API_BASE}{path}"
-    r = requests.get(url, params=params or {}, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-
-def api_search(
-    city: str,
-    country: str,
-    days_ahead: int,
-    start_in_days: int,
-    include_mock: bool,
-    query: str | None,
-) -> Dict[str, Any]:
-    params = {
-        "city": city,
-        "country": country,
-        "days_ahead": days_ahead,
-        "start_in_days": start_in_days,
-        "include_mock": str(include_mock).lower(),
+if "prefs" not in st.session_state:
+    st.session_state.prefs = {
+        "api_base_override": None,
+        "default_city": "Vilnius",
+        "default_country": "LT",
+        "include_mock": False,
+        "days_ahead": 120,
+        "start_in_days": 0,
     }
-    if query:
-        params["query"] = query
 
-    return api_get("/events/search", params=params)
+if "last_results" not in st.session_state:
+    st.session_state.last_results = []
 
-
-def clean_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # ensure we always have consistent fields for display/export
-    cleaned = []
-    for e in items:
-        cleaned.append(
-            {
-                "source": e.get("source"),
-                "external_id": e.get("external_id"),
-                "title": e.get("title") or "Untitled",
-                "category": e.get("category"),
-                "start_time": e.get("start_time"),
-                "city": e.get("city"),
-                "country": e.get("country"),
-                "venue_name": e.get("venue_name"),
-                "min_price": e.get("min_price"),
-                "currency": e.get("currency"),
-                "url": e.get("url"),
-            }
-        )
-    return cleaned
-
-
-def to_csv_bytes(items: List[Dict[str, Any]]) -> bytes:
-    df = pd.DataFrame(items)
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def event_subtitle(e: Dict[str, Any]) -> str:
-    parts = []
-    if e.get("venue_name"):
-        parts.append(e["venue_name"])
-    if e.get("city") or e.get("country"):
-        parts.append(", ".join([p for p in [e.get("city"), e.get("country")] if p]))
-    if e.get("start_time"):
-        parts.append(e["start_time"])
-    return " • ".join(parts)
-
-
-def _event_key(e: Dict[str, Any]) -> str:
-    ext = e.get("external_id") or ""
-    title = e.get("title") or ""
-    start = e.get("start_time") or ""
-    venue = e.get("venue_name") or ""
-    return f"{ext}|{title}|{start}|{venue}".strip()
-
-
-# -------- sidebar controls --------
-st.title("Socialite")
-
-with st.sidebar:
-    st.subheader("Search")
-    col1, col2 = st.columns(2)
-    with col1:
-        city = st.text_input("City", value=st.session_state.get("city", "Vilnius"))
-    with col2:
-        country = st.text_input("Country (ISO-2)", value=st.session_state.get("country", "LT"))
-
-    col3, col4 = st.columns(2)
-    with col3:
-        start_in_days = st.number_input("Start in (days)", min_value=0, max_value=365, value=0)
-    with col4:
-        days_ahead = st.number_input("Days ahead", min_value=1, max_value=365, value=90)
-
-    query = st.text_input("Keyword (optional)", value="")
-    include_mock = st.checkbox("Include mock data", value=False)
-
-    run = st.button("🔎 Search", use_container_width=True)
+API_BASE = st.session_state.prefs["api_base_override"] or _get_api_base()
+store = get_store()
 
 tabs = st.tabs(["Discover", "Saved ⭐", "Settings"])
 
-
-# -------- Discover --------
+# ===============================
+# Discover
+# ===============================
 with tabs[0]:
-    st.write("Use the filters in the sidebar, then click **Search**.")
+    st.write("Use the filters in the left sidebar, then click **Search**.")
 
-    if run:
-        st.session_state["city"] = city
-        st.session_state["country"] = country
+    with st.sidebar:
+        st.header("Search")
+        city = st.text_input("City", st.session_state.prefs["default_city"])
+        country = st.text_input("Country (ISO-2)", st.session_state.prefs["default_country"])
+        start_in_days = st.number_input("Start in (days)", min_value=0,
+                                        value=st.session_state.prefs["start_in_days"], step=1)
+        days_ahead = st.number_input("Days ahead", min_value=1,
+                                     value=st.session_state.prefs["days_ahead"], step=1)
+        query = st.text_input("Keyword (optional)", value="")
+        include_mock = st.checkbox("Include mock data", value=st.session_state.prefs["include_mock"])
 
-        with st.spinner("Finding events…"):
-            try:
-                data = api_search(
-                    city=city,
-                    country=country,
-                    days_ahead=int(days_ahead),
-                    start_in_days=int(start_in_days),
-                    include_mock=bool(include_mock),
-                    query=query or None,
-                )
-                items = clean_items(data.get("items", []))
-                st.session_state.last_results = items
-                count = data.get("count", len(items))
-                st.success(f"Found {count} event(s) for **{data.get('city', city)}**, **{data.get('country', country)}**.")
-            except requests.HTTPError as http_err:
-                st.error(f"API error: {http_err}")
-                items = []
-            except Exception as err:
-                st.error(f"Unexpected error: {err}")
-                items = []
-
-        if not items:
-            st.info("No events matched. Try broadening search or increasing the date range.")
+        st.divider()
+        st.subheader("Providers")
+        with st.spinner("Loading providers…"):
+            providers = _get_providers(API_BASE)
+        if providers:
+            sel = st.multiselect(
+                "Limit to these sources (optional)",
+                options=providers,
+                default=providers,  # preselect all
+            )
         else:
-            # top controls: download CSV + small help
-            left, right = st.columns([1, 1])
-            with left:
-                st.download_button(
-                    "Download CSV",
-                    data=to_csv_bytes(items),
-                    file_name="socialite_events.csv",
-                    mime="text/csv",
-                )
-            with right:
-                st.caption("Click a card’s ⭐ to save it to your **Saved** tab.")
+            sel = []
+            st.caption("No provider list available from API; searching with API defaults.")
 
-            # render cards in a responsive grid
-            cols = st.columns(2)
-            for idx, e in enumerate(items):
-                c = cols[idx % 2]
-                with c.container(border=True):
-                    st.subheader(e["title"])
-                    st.write(event_subtitle(e))
+        do_search = st.button("🔎 Search", use_container_width=True)
+
+    if do_search:
+        params = {
+            "city": city,
+            "country": country,
+            "start_in_days": int(start_in_days),
+            "days_ahead": int(days_ahead),
+            "query": query,
+            "include_mock": str(include_mock).lower(),
+        }
+        # Send both names the backend *might* accept for compatibility
+        if sel:
+            params["domains"] = ",".join(sel)
+            params["sources"] = ",".join(sel)
+
+        try:
+            with st.spinner("Finding events…"):
+                data = _api_get(API_BASE, "/events/search", params)
+                items: List[Dict[str, Any]] = data.get("items", [])
+                st.session_state.last_results = items
+                st.success(
+                    f"Found {len(items)} event(s) for **{data.get('city', city)}**, "
+                    f"**{data.get('country', country)}**"
+                )
+        except Exception as e:
+            title, body = _classify_error(e)
+            st.error(f"**{title}** — {body}")
+            st.session_state.last_results = []
+
+    items = st.session_state.last_results or []
+    if not items:
+        st.info("No events matched. Try broadening search or increasing the date range.")
+    else:
+        # toolbar
+        left, right = st.columns([1, 1])
+        with left:
+            st.download_button(
+                "Download CSV",
+                data=pd.DataFrame(items).to_csv(index=False).encode("utf-8"),
+                file_name="socialite_events.csv",
+                mime="text/csv",
+            )
+        with right:
+            st.caption("Click a card’s ⭐ to save it.")
+
+        # cards
+        for e in items:
+            eid = e.get("external_id") or _stable_id(e)
+            with st.container(border=True):
+                top = st.columns([0.78, 0.22])
+                with top[0]:
+                    st.subheader(e.get("title") or "Untitled")
+                    meta_line = []
+                    meta_line.append(f"**When:** {_human_time(e.get('start_time'))}")
+                    if e.get("venue_name"):
+                        meta_line.append(f"**Where:** {e['venue_name']}")
+                    st.write(" · ".join(meta_line))
+
+                    line2 = []
+                    if e.get("city") or e.get("country"):
+                        line2.append(f"**Location:** {e.get('city','')} {e.get('country','')}".strip())
+                    if e.get("category"):
+                        line2.append(f"**Category:** {e['category']}")
+                    st.write(" · ".join(line2))
+
+                    # badges row
+                    bcols = st.columns([0.2, 0.8])
+                    with bcols[0]:
+                        st.caption("Source")
+                    with bcols[1]:
+                        st.markdown(
+                            f"<span style='padding:2px 6px;border:1px solid #555;border-radius:6px;'>"
+                            f"{_pretty_source(e.get('source'))}"
+                            f"</span>",
+                            unsafe_allow_html=True,
+                        )
+
                     if e.get("url"):
                         st.link_button("Open", e["url"])
-                    # actions
-                    a1, a2, a3 = st.columns([1, 1, 1])
-                    with a1:
-                        if st.button("⭐ Save", key=f"save::{_event_key(e)}"):
-                            storage.add_item(e)
-                            st.toast("Saved!", icon="⭐")
-                    with a2:
-                        min_price = e.get("min_price")
-                        currency = e.get("currency")
-                        if min_price is not None and currency:
-                            st.write(f"From {min_price} {currency}")
+
+                with top[1]:
+                    label = "★ Save" if not store.is_saved(eid) else "★ Saved"
+                    if st.button(label, key=f"save::{eid}"):
+                        if store.is_saved(eid):
+                            store.remove(eid)
+                            st.toast("Removed from Saved", icon="⚠️")
                         else:
-                            st.write("Price: N/A")
-                    with a3:
-                        st.write(f"Source: {e.get('source') or 'web'}")
+                            store.upsert(eid, e)
+                            st.toast("Saved to favorites", icon="⭐")
 
-
-# -------- Saved --------
+# ===============================
+# Saved
+# ===============================
 with tabs[1]:
-    saved = storage.list_items()
-    st.subheader(f"Saved events ({len(saved)})")
-
+    st.write("Your starred events are stored locally (`~/.socialite/saved.json`).")
+    saved = store.list()
     if not saved:
-        st.info("No saved events yet. Go to **Discover** and click ⭐.")
+        st.info("No saved items yet.")
     else:
-        top_l, top_r = st.columns([1, 1])
-        with top_l:
+        left, right = st.columns([1, 1])
+        with left:
             st.download_button(
-                "Download Saved as CSV",
-                data=to_csv_bytes(saved),
+                "Export Saved (CSV)",
+                data=pd.DataFrame([r["data"] for r in saved]).to_csv(index=False).encode("utf-8"),
                 file_name="socialite_saved.csv",
                 mime="text/csv",
             )
-        with top_r:
-            if st.button("🗑️ Clear All", type="primary"):
-                storage.clear_all()
+        with right:
+            if st.button("Clear all ⭐", type="secondary"):
+                for r in saved:
+                    store.remove(r["id"])
                 st.rerun()
 
-        cols = st.columns(2)
-        for idx, e in enumerate(saved):
-            c = cols[idx % 2]
-            with c.container(border=True):
-                st.subheader(e.get("title") or "Untitled")
-                st.write(event_subtitle(e))
-                if e.get("url"):
-                    st.link_button("Open", e["url"])
-                # actions
-                a1, a2 = st.columns([1, 1])
-                with a1:
-                    if st.button("Remove", key=f"remove::{_event_key(e)}"):
-                        storage.remove_item(e)
+        for row in saved:
+            e = row["data"]
+            eid = row["id"]
+            with st.container(border=True):
+                top = st.columns([0.8, 0.2])
+                with top[0]:
+                    st.subheader(e.get("title") or "Untitled")
+                    st.write(f"**When:** {_human_time(e.get('start_time'))}")
+                    st.caption(f"Source: {_pretty_source(e.get('source'))}")
+                    if e.get("url"):
+                        st.link_button("Open", e["url"])
+                with top[1]:
+                    if st.button("✖ Remove", key=f"remove::{eid}"):
+                        store.remove(eid)
                         st.rerun()
-                with a2:
-                    st.write(f"Source: {e.get('source') or 'web'}")
 
-
-# -------- Settings --------
+# ===============================
+# Settings
+# ===============================
 with tabs[2]:
-    st.subheader("Providers")
-    try:
-        providers = api_get("/events/providers").get("providers", [])
-        if providers:
-            st.write(", ".join(providers))
-        else:
-            st.write("No providers reported.")
-    except Exception as e:
-        st.error(f"Could not fetch providers: {e}")
+    st.subheader("App preferences")
+    st.caption("Stored in session while the app is running.")
 
-    st.divider()
-    st.caption(
-        "Saved items are stored at "
-        f"`{storage.SAVED_PATH}` – handy if you want to back them up or inspect them."
-    )
+    with st.form("prefs_form"):
+        api_override = st.text_input(
+            "API base override (optional)",
+            value=st.session_state.prefs["api_base_override"] or "",
+            help="e.g., https://socialite-api.onrender.com",
+        )
+        dc = st.text_input("Default city", st.session_state.prefs["default_city"])
+        dco = st.text_input("Default country (ISO-2)", st.session_state.prefs["default_country"])
+        sim = st.checkbox("Default: include mock data",
+                          value=st.session_state.prefs["include_mock"])
+        sday = st.number_input("Default: start in (days)", min_value=0,
+                               value=st.session_state.prefs["start_in_days"], step=1)
+        dahead = st.number_input("Default: days ahead", min_value=1,
+                                 value=st.session_state.prefs["days_ahead"], step=1)
+        submitted = st.form_submit_button("Save")
+
+    if submitted:
+        st.session_state.prefs.update(
+            {
+                "api_base_override": api_override.strip() or None,
+                "default_city": dc.strip() or "Vilnius",
+                "default_country": dco.strip() or "LT",
+                "include_mock": bool(sim),
+                "start_in_days": int(sday),
+                "days_ahead": int(dahead),
+            }
+        )
+        st.success("Preferences updated.")
+        st.rerun()

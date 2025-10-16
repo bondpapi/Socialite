@@ -1,66 +1,88 @@
-# social_agent_ai/services/storage.py
 from __future__ import annotations
-from pathlib import Path
+
 import json
-from typing import Any, Dict, List
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-APP_DIR = Path.home() / ".socialite"
-APP_DIR.mkdir(parents=True, exist_ok=True)
-SAVED_PATH = APP_DIR / "saved.json"
+
+def _default_db_path() -> Path:
+    root = Path(os.environ.get("SOCIALITE_DB_DIR", Path.home() / ".socialite"))
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "saved.json"
 
 
-def _load() -> Dict[str, Any]:
-    if SAVED_PATH.exists():
+class SavedStore:
+    """
+    A tiny, threadsafe JSON store for saved events.
+    Schema:
+      {
+        "items": [
+          { "id": "<stable-hash>", "saved_at": 1700000000, "data": {...event...} }
+        ]
+      }
+    """
+    def __init__(self, path: Optional[Path] = None) -> None:
+        self.path = Path(path) if path else _default_db_path()
+        self._lock = threading.Lock()
+        if not self.path.exists():
+            self._write({"items": []})
+
+    # ---------- internal IO ----------
+
+    def _read(self) -> Dict[str, Any]:
         try:
-            with SAVED_PATH.open("r", encoding="utf-8") as f:
-                return json.load(f) or {}
-        except Exception:
-            return {}
-    return {}
+            raw = self.path.read_text(encoding="utf-8")
+            return json.loads(raw) if raw else {"items": []}
+        except FileNotFoundError:
+            return {"items": []}
+
+    def _write(self, obj: Dict[str, Any]) -> None:
+        self.path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # ---------- public API ----------
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self._read().get("items", []))
+
+    def _index_of(self, event_id: str) -> int:
+        data = self._read()
+        for i, row in enumerate(data.get("items", [])):
+            if row.get("id") == event_id:
+                return i
+        return -1
+
+    def upsert(self, event_id: str, event_data: Dict[str, Any]) -> None:
+        with self._lock:
+            data = self._read()
+            idx = self._index_of(event_id)
+            row = {"id": event_id, "saved_at": int(time.time()), "data": event_data}
+            if idx >= 0:
+                data["items"][idx] = row
+            else:
+                data.setdefault("items", []).append(row)
+            self._write(data)
+
+    def remove(self, event_id: str) -> bool:
+        with self._lock:
+            data = self._read()
+            before = len(data.get("items", []))
+            data["items"] = [r for r in data.get("items", []) if r.get("id") != event_id]
+            self._write(data)
+            return len(data["items"]) < before
+
+    def is_saved(self, event_id: str) -> bool:
+        return self._index_of(event_id) >= 0
 
 
-def _save(data: Dict[str, Any]) -> None:
-    tmp = SAVED_PATH.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    tmp.replace(SAVED_PATH)
+# convenience singleton
+_store_singleton: Optional[SavedStore] = None
 
-
-def list_items() -> List[Dict[str, Any]]:
-    db = _load()
-    items = db.get("items", [])
-    # sort newest saved first
-    return list(reversed(items))
-
-
-def _event_key(e: Dict[str, Any]) -> str:
-    # stable key even if provider lacks external_id
-    ext = e.get("external_id") or ""
-    title = e.get("title") or ""
-    start = e.get("start_time") or ""
-    venue = e.get("venue_name") or ""
-    return f"{ext}|{title}|{start}|{venue}".strip()
-
-
-def add_item(e: Dict[str, Any]) -> None:
-    db = _load()
-    items: List[Dict[str, Any]] = db.get("items", [])
-    k = _event_key(e)
-    # dedupe by key
-    if not any(_event_key(x) == k for x in items):
-        items.append(e)
-        db["items"] = items
-        _save(db)
-
-
-def remove_item(e: Dict[str, Any]) -> None:
-    db = _load()
-    items: List[Dict[str, Any]] = db.get("items", [])
-    k = _event_key(e)
-    items = [x for x in items if _event_key(x) != k]
-    db["items"] = items
-    _save(db)
-
-
-def clear_all() -> None:
-    _save({"items": []})
+def get_store() -> SavedStore:
+    global _store_singleton
+    if _store_singleton is None:
+        _store_singleton = SavedStore()
+    return _store_singleton

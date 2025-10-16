@@ -1,89 +1,90 @@
 from __future__ import annotations
-import httpx
-from datetime import datetime, timezone
-from .base import EventRecord
 
-EB_BASE = "https://www.eventbriteapi.com/v3"
+from typing import Any, Dict, List, Optional
+import logging
+from datetime import datetime, timedelta, timezone
 
-CITY_COORDS = {
-    ("tallinn","ee"): (59.437, 24.7536),
-    ("riga","lv"): (56.9496, 24.1052),
-    ("vilnius","lt"): (54.6872, 25.2797),
-    ("berlin","de"): (52.52, 13.405),
-}
+import requests
 
-def _to_iso_z(dt: datetime | None) -> str | None:
-    if not dt:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+from social_agent_ai.utils.http_client import HttpClient
 
-def _parse(dt_s: str | None) -> datetime | None:
-    if not dt_s:
-        return None
-    return datetime.fromisoformat(dt_s.replace("Z", "+00:00"))
+logger = logging.getLogger(__name__)
 
-class EventbriteProvider:
-    name = "eventbrite"
+BASE_URL = "https://www.eventbriteapi.com/v3"
 
-    def __init__(self, token: str, within_km: int = 75):
-        self.token = token
-        self.within_km = within_km
 
-    async def search(self, *, city: str, country: str, start=None, end=None, query=None):
-        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
+def _iso(dt: datetime) -> str:
+    # Eventbrite expects UTC ISO with 'Z'
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        # Keep params minimal; some regions/tokens 404 on extra fields
-        base = {"sort_by": "date"}
-        s = _to_iso_z(start); e = _to_iso_z(end)
-        if s: base["start_date.range_start"] = s
-        if e: base["start_date.range_end"] = e
-        if query: base["q"] = query
 
-        # Try address form first (city only)
-        params = base | {"location.address": city, "location.within": f"{self.within_km}km"}
+def search(
+    *,
+    client: HttpClient,
+    token: Optional[str],
+    city: str,
+    country: str,
+    start_in_days: int,
+    days_ahead: int,
+    keyword: Optional[str] = None,
+    radius_km: int = 75,
+) -> List[Dict[str, Any]]:
+    """
+    Returns a normalized list of events from Eventbrite.
+    Gracefully handles 404 and non-OK by returning [] and logging.
+    """
+    if not token:
+        logger.debug("Eventbrite token not configured; skipping.")
+        return []
 
-        async with httpx.AsyncClient(timeout=25) as client:
-            try:
-                r = await client.get(f"{EB_BASE}/events/search/", headers=headers, params=params)
-                r.raise_for_status()
-                data = r.json()
-            except httpx.HTTPStatusError:
-                # Fallback: lat/lon (more reliable)
-                key = (city.lower(), country.lower())
-                if key not in CITY_COORDS:
-                    raise
-                lat, lon = CITY_COORDS[key]
-                params = base | {
-                    "location.latitude": str(lat),
-                    "location.longitude": str(lon),
-                    "location.within": f"{self.within_km}km",
-                }
-                r = await client.get(f"{EB_BASE}/events/search/", headers=headers, params=params)
-                r.raise_for_status()
-                data = r.json()
+    start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
+    end = start + timedelta(days=days_ahead)
 
-        results = []
-        for ev in data.get("events", []) or []:
-            venue = ev.get("venue") or {}
-            addr = venue.get("address") or {}
-            title = (ev.get("name") or {}).get("text") or ev.get("name") or "Event"
-            currency = ev.get("currency") or "EUR"
-            is_free = bool(ev.get("is_free"))
-            results.append(EventRecord(
-                source=self.name,
-                external_id=str(ev.get("id")),
-                title=title,
-                category="unknown",
-                start_time=_parse((ev.get("start") or {}).get("utc")),
-                city=addr.get("city") or city,
-                country=addr.get("country") or country,
-                venue_name=venue.get("name"),
-                min_price=0.0 if is_free else None,
-                currency=currency,
-                url=ev.get("url"),
-            ))
-        return results
+    params: Dict[str, Any] = {
+        "sort_by": "date",
+        "location.address": city,
+        "location.within": f"{radius_km}km",
+        "start_date.range_start": _iso(start),
+        "start_date.range_end": _iso(end),
+        "expand": "venue",
+        "page_size": 50,
+    }
+    if keyword:
+        params["q"] = keyword
+
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        data = client.get_json(f"{BASE_URL}/events/search/", params=params, headers=headers, default={})
+    except requests.HTTPError as e:
+        logger.warning("Eventbrite search failed: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("Eventbrite unexpected error: %s", e)
+        return []
+
+    # Normalize
+    items: List[Dict[str, Any]] = []
+    events = (data or {}).get("events", []) if isinstance(data, dict) else []
+    for ev in events:
+        name = ((ev.get("name") or {}).get("text")) or "Untitled"
+        start_time = ((ev.get("start") or {}).get("utc")) or None
+        url = ev.get("url")
+        venue = (ev.get("venue") or {}).get("name")
+
+        items.append(
+            {
+                "source": "eventbrite",
+                "external_id": ev.get("id"),
+                "title": name,
+                "category": "Event",
+                "start_time": start_time,
+                "city": city,
+                "country": country,
+                "venue_name": venue,
+                "min_price": None,
+                "currency": None,
+                "url": url,
+            }
+        )
+    return items
