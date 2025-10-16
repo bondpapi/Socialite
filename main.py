@@ -1,11 +1,14 @@
-from fastapi import FastAPI
-from .db import init_db
-from .routers import events, profile, notify
+from __future__ import annotations
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Socialite", version="0.1.0")
+from social_agent_ai.routers import events, providers
+from social_agent_ai.routers import saved as saved_router  # NEW
 
+app = FastAPI(title="Socialite API")
+
+# CORS for local UI and cloud UIs
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,17 +17,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-@app.on_event("startup")
-def startup():
-    init_db()
-
-
-app.include_router(profile.router)
+# Existing endpoints
 app.include_router(events.router)
-app.include_router(notify.router)
+app.include_router(providers.router)
+# NEW: saved items
+app.include_router(saved_router.router)
 
 
 @app.get("/")
 def root():
-    return {"hello": "social-agent-ai"}
+    return {"ok": True, "service": "socialite-api"}
