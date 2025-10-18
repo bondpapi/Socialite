@@ -7,6 +7,10 @@ from social_agent_ai.config import settings
 from social_agent_ai.utils.http_client import HttpClient
 from social_agent_ai.providers import eventbrite as eventbrite_provider
 from social_agent_ai.services import web_discovery as web_discovery_service
+from social_agent_ai.providers import kakava
+
+PROVIDERS.append(("kakava", kakava.search))
+
 
 logger = logging.getLogger(__name__)
 

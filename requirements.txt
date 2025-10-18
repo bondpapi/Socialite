@@ -17,3 +17,4 @@ lxml>=5.2.2
 beautifulsoup4>=4.12.3
 dateparser>=1.2.0
 setuptools>=68
+beautifulsoup4==4.12.3
