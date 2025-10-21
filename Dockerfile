@@ -1,38 +1,49 @@
-# Use a mirror for the official python image to avoid Docker Hub 503/limits
-ARG BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
-FROM ${BASE_IMAGE}
+FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 \
-  PYTHONDONTWRITEBYTECODE=1 \
-  API_PORT=8000 \
-  UI_PORT=8501
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Workdir
+# App ports
+ENV API_PORT=8000 \
+    UI_PORT=8501
+
+# Entrypoints / names
+# main.py lives at /app/main.py
+# package folder is /app/social_agent_ai
+ENV APP_MODULE="main:app" \
+    STREAMLIT_ENTRY="app.py" \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+
+ENV PYTHONPATH=/app
+
 WORKDIR /app
 
-# System deps and tini for PID 1
+# System deps we need (curl for healthcheck; tini for PID 1)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  build-essential curl tini \
-  && rm -rf /var/lib/apt/lists/*
+      curl tini build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Python deps (cache layer) then install
+# Python deps (cache wheels)
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-  pip install --upgrade pip \
-  && pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY . .
 
-# Healthcheck (curl the API docs)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
-  CMD curl -fsS "http://127.0.0.1:${API_PORT}/docs" >/dev/null || exit 1
+# Make start script executable
+RUN chmod +x /app/start.sh
 
-# tini forwards signals to our processes
+EXPOSE 8000 8501
+
+# Simple healthcheck against FastAPI docs page
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s CMD \
+  curl -fsS "http://127.0.0.1:${API_PORT}/docs" >/dev/null || exit 1
+
+# tini forwards signals properly to both processes
 ENTRYPOINT ["/usr/bin/tini","--"]
 
-# Start API (background) and Streamlit in the foreground
-CMD ["/bin/sh","-lc", \
-  "uvicorn main:app --host 0.0.0.0 --port $API_PORT & \
-  exec streamlit run app.py --server.port=$UI_PORT --server.address=0.0.0.0" \
-  ]
+# Start API (background), then Streamlit in foreground
+CMD ["/bin/sh","-lc","/app/start.sh"]
