@@ -1,13 +1,23 @@
 import os
-import time
-import json
+from datetime import datetime, timedelta
+from typing import Dict, Any, List
 import pandas as pd
 import requests
 import streamlit as st
 
-# ------------------ Config ------------------
+# ------------------ Config / API base ------------------
+def _get_api_base() -> str:
+    # Streamlit Cloud secrets > ENV var > localhost default
+    if hasattr(st, "secrets") and "API_BASE" in st.secrets:
+        return st.secrets["API_BASE"].rstrip("/")
+    return os.environ.get("API_BASE", "http://127.0.0.1:8000").rstrip("/")
+
+
+API_BASE = _get_api_base()
+DEFAULT_CITY = os.getenv("DEFAULT_CITY", "Kaunas")
+DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "LT")
+
 st.set_page_config(page_title="Socialite", layout="wide")
-API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
 
 # ------------------ Session state ------------------
 if "user" not in st.session_state:
@@ -25,10 +35,12 @@ def _api_get(path: str, params=None):
     r.raise_for_status()
     return r.json()
 
+
 def _api_post(path: str, json_body=None):
     r = requests.post(f"{API_BASE}{path}", json=json_body, timeout=60)
     r.raise_for_status()
     return r.json()
+
 
 def _fetch_profile(user_id: str):
     try:
@@ -36,13 +48,15 @@ def _fetch_profile(user_id: str):
     except Exception:
         return {}
 
-def _save_profile(user_id: str, home_city: str, home_country: str, passions: list[str]):
+
+def _save_profile(user_id: str, home_city: str, home_country: str, passions: List[str]):
     payload = {
         "home_city": home_city or None,
         "home_country": home_country or None,
         "passions": passions or [],
     }
     return _api_post(f"/profile/{user_id}", payload)
+
 
 def _search_events(city, country, days_ahead, start_in_days, include_mock, query):
     params = {
@@ -56,19 +70,23 @@ def _search_events(city, country, days_ahead, start_in_days, include_mock, query
         params["query"] = query
     return _api_get("/events/search", params)
 
+
 def _agent_chat(user_id: str, message: str):
     payload = {"user_id": user_id, "message": message}
     return _api_post("/agent/chat", payload)
 
+
 def _read_digest(user_id: str):
     return _api_get(f"/agent/digest/{user_id}")
+
 
 # ------------------ Sidebar (search form) ------------------
 with st.sidebar:
     st.header("Search")
-    city = st.text_input("City", value="Kaunas")
-    country = st.text_input("Country (ISO-2)", value="LT")
-    start_in_days = st.number_input("Start in (days)", min_value=0, value=0, step=1)
+    city = st.text_input("City", value=DEFAULT_CITY)
+    country = st.text_input("Country (ISO-2)", value=DEFAULT_COUNTRY)
+    start_in_days = st.number_input(
+        "Start in (days)", min_value=0, value=0, step=1)
     days_ahead = st.number_input("Days ahead", min_value=1, value=120, step=1)
     query = st.text_input("Keyword (optional)", value="sports")
     include_mock = st.checkbox("Include mock data", value=False)
@@ -81,14 +99,18 @@ tabs = st.tabs(["Discover", "Chat 🤖", "Settings"])
 # ------------------ Discover Tab ------------------
 with tabs[0]:
     st.write("Use the filters in the left sidebar, then click **Search**.")
+    items: List[Dict[str, Any]] = []
     if run_search:
         with st.spinner("Finding events..."):
             try:
-                data = _search_events(city, country, days_ahead, start_in_days, include_mock, query)
+                data = _search_events(
+                    city, country, days_ahead, start_in_days, include_mock, query)
                 items = data.get("items", [])
                 st.session_state.last_results = items
                 count = data.get("count", len(items))
-                st.success(f"Found {count} event(s) for **{data.get('city', city)}**, **{data.get('country', country)}**")
+                st.success(
+                    f"Found {count} event(s) for **{data.get('city', city)}**, **{data.get('country', country)}**"
+                )
             except requests.HTTPError as e:
                 st.error(f"API error: {e}")
                 items = []
@@ -96,47 +118,60 @@ with tabs[0]:
                 st.error(f"Unexpected error: {e}")
                 items = []
 
-        if not items:
-            st.info("No events matched. Try broadening search or increasing the date range.")
-        else:
-            # Top controls
-            left, right = st.columns([1, 1])
-            with left:
-                df = pd.DataFrame(items)
-                st.download_button(
-                    "Download CSV",
-                    data=df.to_csv(index=False).encode("utf-8"),
-                    file_name="socialite_events.csv",
-                    mime="text/csv",
-                )
-            with right:
-                st.caption("Click a card’s ⭐ to save it.")
+    # show last results if no fresh search
+    if (not run_search) and st.session_state.last_results and not items:
+        items = st.session_state.last_results
+        st.caption("Showing last results (cached). Click **Search** to refresh.")
 
-            # Cards
-            for e in items:
-                with st.container(border=True):
-                    top = st.columns([0.85, 0.15])
-                    with top[0]:
-                        st.subheader(e.get("title") or "Untitled")
-                        sub = []
-                        if e.get("venue_name"): sub.append(e["venue_name"])
-                        if e.get("city"): sub.append(e["city"])
-                        if e.get("country"): sub.append(e["country"])
-                        st.write(", ".join([s for s in sub if s]))
-                    with top[1]:
-                        if st.button("⭐ Save", key=f"save::{e.get('external_id') or e.get('title')}"):
-                            st.session_state.saved.append(e)
-                            st.toast("Saved!", icon="⭐")
+    if not items:
+        st.info(
+            "No events matched. Try broadening search or increasing the date range.")
+    else:
+        # Top controls
+        left, right = st.columns([1, 1])
+        with left:
+            df = pd.DataFrame(items)
+            st.download_button(
+                "Download CSV",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="socialite_events.csv",
+                mime="text/csv",
+            )
+        with right:
+            st.caption("Click a card’s ⭐ to save it.")
 
-                    meta = []
-                    if e.get("category"): meta.append(f"**Category:** {e['category']}")
-                    if e.get("start_time"): meta.append(f"**Start:** {e['start_time']}")
-                    if e.get("min_price") is not None:
-                        meta.append(f"**From:** {e['min_price']} {e.get('currency','')}".strip())
-                    if meta:
-                        st.write(" • ".join(meta))
-                    if e.get("url"):
-                        st.write(f"[Open event]({e['url']})")
+        # Cards
+        for e in items:
+            with st.container():
+                top = st.columns([0.85, 0.15])
+                with top[0]:
+                    st.subheader(e.get("title") or "Untitled")
+                    sub = []
+                    if e.get("venue_name"):
+                        sub.append(e["venue_name"])
+                    if e.get("city"):
+                        sub.append(e["city"])
+                    if e.get("country"):
+                        sub.append(e["country"])
+                    st.write(", ".join([s for s in sub if s]))
+                with top[1]:
+                    key = f"save::{e.get('external_id') or e.get('title')}"
+                    if st.button("⭐ Save", key=key):
+                        st.session_state.saved.append(e)
+                        st.success("Saved!")
+
+                meta = []
+                if e.get("category"):
+                    meta.append(f"**Category:** {e['category']}")
+                if e.get("start_time"):
+                    meta.append(f"**Start:** {e['start_time']}")
+                if e.get("min_price") is not None:
+                    meta.append(
+                        f"**From:** {e['min_price']} {e.get('currency', '')}".strip())
+                if meta:
+                    st.write(" • ".join(meta))
+                if e.get("url"):
+                    st.write(f"[Open event]({e['url']})")
 
     # Saved items (in this session)
     if st.session_state.saved:
@@ -148,33 +183,42 @@ with tabs[0]:
 # ------------------ Chat Tab ------------------
 with tabs[1]:
     st.header("Chat with Socialite 🤖")
-    col1, col2, col3 = st.columns([1,1,1])
+    col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
-        username = st.text_input("Username", value=st.session_state.user["username"])
+        username = st.text_input(
+            "Username", value=st.session_state.user["username"])
     with col2:
-        user_id = st.text_input("User ID", value=st.session_state.user["user_id"])
+        user_id = st.text_input(
+            "User ID", value=st.session_state.user["user_id"])
     with col3:
         if st.button("Login (mock)"):
             try:
                 out = _api_post("/auth/mock-login", {"username": username})
-                st.session_state.user = {"user_id": out["user_id"], "username": username}
+                st.session_state.user = {
+                    "user_id": out["user_id"], "username": username}
                 st.success(f"Signed in as {username} ({out['user_id']})")
             except Exception as e:
                 st.error(f"Login failed: {e}")
 
     # show chat history
-    for role, text in st.session_state.chatlog:
+    for entry in st.session_state.chatlog:
+        # each entry expected to be a (role, text) tuple/list
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            role, text = entry
+        else:
+            role, text = "user", str(entry)
         with st.chat_message(role):
             st.write(text)
 
-    prompt = st.chat_input("Ask me for plans, search something, or 'subscribe me weekly' …")
+    prompt = st.chat_input(
+        "Ask me for plans, search something, or 'subscribe me weekly' …")
     if prompt:
         st.session_state.chatlog.append(("user", prompt))
         with st.chat_message("assistant"):
             with st.spinner("Thinking…"):
                 try:
                     res = _agent_chat(st.session_state.user["user_id"], prompt)
-                    reply = res["reply"]
+                    reply = res.get("reply", "")
                     st.session_state.chatlog.append(("assistant", reply))
                     st.write(reply)
                 except Exception as e:
@@ -192,11 +236,13 @@ with tabs[1]:
                 else:
                     st.success(f"Got {len(items)} new picks for you:")
                     for e in items:
-                        st.markdown(f"- **{e.get('title','(untitled)')}** — {e.get('city','')} {e.get('country','')}")
+                        st.markdown(
+                            f"- **{e.get('title', '(untitled)')}** — {e.get('city', '')} {e.get('country', '')}")
             except Exception as e:
                 st.error(f"Digest error: {e}")
     with c2:
-        st.caption("Digest is produced by the server scheduler. Use Settings to set your city & passions.")
+        st.caption(
+            "Digest is produced by the server scheduler. Use Settings to set your city & passions.")
 
 # ------------------ Settings Tab ------------------
 with tabs[2]:
@@ -214,12 +260,14 @@ with tabs[2]:
         home_city = st.text_input("Home city", value=ph_city)
         home_country = st.text_input("Home country (ISO-2)", value=ph_country)
     with s2:
-        passions_raw = st.text_input("Passions (comma-separated)", value=ph_passions)
+        passions_raw = st.text_input(
+            "Passions (comma-separated)", value=ph_passions)
 
     if st.button("💾 Save preferences"):
         passions = [p.strip() for p in passions_raw.split(",") if p.strip()]
         try:
-            _save_profile(st.session_state.user["user_id"], home_city, home_country, passions)
+            _save_profile(
+                st.session_state.user["user_id"], home_city, home_country, passions)
             st.success("Preferences saved.")
         except Exception as e:
             st.error(f"Save failed: {e}")

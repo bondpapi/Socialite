@@ -6,7 +6,7 @@ from typing import Callable
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from social_agent_ai.services.metrics import log_http, init_metrics_tables
+from services.metrics import log_http, init_metrics_tables
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):
