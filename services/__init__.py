@@ -1,9 +1,11 @@
-from services.aggregator import search_events, get_providers
-from services.storage import init_db, save_event, get_saved_events
-from services.metrics import log_hit, init_metrics_tables
+"""
+Service package marker.
 
-__all__ = [
-    "search_events", "get_providers",
-    "init_db", "save_event", "get_saved_events",
-    "log_hit", "init_metrics_tables",
-]
+Intentionally empty to avoid heavy imports at package import time.
+Import the concrete modules directly, e.g.:
+
+    from services.metrics import log_http, init_metrics_tables
+    from services.storage import init_db, save_event, get_saved_events
+    from services.aggregator import search_events, PROVIDERS
+"""
+__all__: list[str] = []
