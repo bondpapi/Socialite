@@ -1,19 +1,19 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+  PYTHONUNBUFFERED=1
 
 # App ports
 ENV API_PORT=8000 \
-    UI_PORT=8501
+  UI_PORT=8501
 
 # Entrypoints / names
 # main.py lives at /app/main.py
 # package folder is /app/social_agent_ai
 ENV APP_MODULE="main:app" \
-    STREAMLIT_ENTRY="app.py" \
-    STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+  STREAMLIT_ENTRY="app.py" \
+  STREAMLIT_SERVER_HEADLESS=true \
+  STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 
 ENV PYTHONPATH=/app
@@ -22,13 +22,13 @@ WORKDIR /app
 
 # System deps we need (curl for healthcheck; tini for PID 1)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl tini build-essential \
-    && rm -rf /var/lib/apt/lists/*
+  curl tini build-essential \
+  && rm -rf /var/lib/apt/lists/*
 
 # Python deps (cache wheels)
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt
+  pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY . .
