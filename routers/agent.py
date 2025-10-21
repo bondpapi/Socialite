@@ -24,7 +24,8 @@ def chat(payload: ChatIn) -> ChatOut:
         turn = run_agent(payload.user_id, payload.message)
         return ChatOut(reply=turn.reply, used_tools=turn.used_tools)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"agent.chat failed: {exc!r}")
+        raise HTTPException(
+            status_code=500, detail=f"agent.chat failed: {exc!r}")
 
 
 @router.get("/digest/{user_id}")
