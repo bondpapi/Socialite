@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from ..services.aggregator import search_events, PROVIDERS
-from ..services.recommend import rank_events
-from ..schemas import EventOut
+from services.aggregator import search_events, PROVIDERS
+from services.recommend import rank_events
+from schemas import EventOut
 
 
 router = APIRouter(prefix="/events", tags=["events"])

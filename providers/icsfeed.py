@@ -2,7 +2,7 @@ from __future__ import annotations
 import httpx
 from datetime import datetime, timezone, date
 from icalendar import Calendar
-from .base import EventRecord
+from base import EventRecord
 
 class ICSFeedProvider:
     name = "ics"

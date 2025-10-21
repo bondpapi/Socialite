@@ -2,7 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List, Optional
-from ..services import storage
+from services import storage
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 

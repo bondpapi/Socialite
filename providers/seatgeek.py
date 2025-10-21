@@ -1,5 +1,5 @@
 import httpx
-from .base import EventRecord
+from base import EventRecord
 
 SG_BASE = "https://api.seatgeek.com/2/events"
 

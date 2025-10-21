@@ -2,8 +2,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..agent import run_agent
-from ..services import storage
+from agent import run_agent
+from services import storage
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 

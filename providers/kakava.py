@@ -3,8 +3,8 @@ kakava.lt provider (skeleton).
 """
 from __future__ import annotations
 from typing import Dict, List, Any, Tuple
-from bs4 import BeautifulSoup  # add to requirements.txt
-from ..services.http import get
+from bs4 import BeautifulSoup 
+from services.http import get
 
 BASE = "https://kakava.lt"  # TODO: verify base and endpoints
 

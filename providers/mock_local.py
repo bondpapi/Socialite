@@ -1,4 +1,4 @@
-from .base import Provider, EventRecord
+from base import Provider, EventRecord
 from datetime import datetime, timedelta
 
 class MockLocalProvider:

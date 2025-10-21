@@ -1,8 +1,7 @@
-# social_agent_ai/providers/ticketmaster.py
 from __future__ import annotations
 import httpx
 from datetime import datetime, timezone
-from .base import EventRecord
+from base import EventRecord
 
 TM_BASE = "https://app.ticketmaster.com/discovery/v2"
 

@@ -1,7 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from ..config import settings
-from .aggregator import search_events
-from .recommend import rank_events
+from config import settings
+from aggregator import search_events
+from recommend import rank_events
 
 scheduler = AsyncIOScheduler(timezone=settings.app_timezone)
 

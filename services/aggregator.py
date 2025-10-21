@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple, Callable
 
-from .schemas import EventOut
+from schemas import EventOut
 
 @dataclass
 class _CacheEntry:
