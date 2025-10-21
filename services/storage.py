@@ -1,131 +1,137 @@
+# services/storage.py
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-from datetime import datetime
-import sqlite3
-import json
+
 import os
-import threading
+import sqlite3
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, List, Optional
 
-_DB = os.getenv("SOCIALITE_DB", "social_agent.db")
-_lock = threading.Lock()
+DB_PATH = os.getenv("DB_PATH", "social_agent.db")
 
+# ---------- low-level helpers ----------
 
-def _conn():
-    c = sqlite3.connect(_DB)
-    c.row_factory = sqlite3.Row
-    return c
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+@contextmanager
+def _db():
+    conn = _connect()
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
-def init():
-    with _lock, _conn() as cx:
-        cx.executescript("""
-        CREATE TABLE IF NOT EXISTS user_prefs (
-            user_id TEXT PRIMARY KEY,
-            home_city TEXT,
-            home_country TEXT,
-            passions TEXT
-        );
-        CREATE TABLE IF NOT EXISTS subs (
-            user_id TEXT PRIMARY KEY,
-            frequency TEXT,
-            last_sent_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS digests (
-            user_id TEXT,
-            payload TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS search_log (
-            user_id TEXT,
-            payload TEXT,
-            count INTEGER,
-            created_at TEXT
-        );
-        """)
-        cx.commit()
+# ---------- schema & init ----------
 
+def init_db() -> None:
+    """
+    Creates tables if they don't exist. Safe to call repeatedly.
+    """
+    with _db() as conn:
+        c = conn.cursor()
 
-# Call at import time
-init()
+        # Saved events (dedupe on source + external_id)
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT,
+                start_time TEXT,
+                city TEXT,
+                country TEXT,
+                venue_name TEXT,
+                min_price REAL,
+                currency TEXT,
+                url TEXT,
+                saved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (source, external_id)
+            )
+            """
+        )
 
+        # Optional: metrics table (some middleware uses this)
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT DEFAULT CURRENT_TIMESTAMP,
+                route TEXT,
+                status INTEGER,
+                elapsed_ms REAL
+            )
+            """
+        )
 
-def save_preferences(user_id: str, home_city: str | None, home_country: str | None, passions: List[str] | None):
-    with _lock, _conn() as cx:
-        cx.execute("""
-            INSERT INTO user_prefs(user_id, home_city, home_country, passions)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET home_city=excluded.home_city,
-                                             home_country=excluded.home_country,
-                                             passions=excluded.passions
-        """, (user_id, home_city, home_country, json.dumps(passions or [])))
-        cx.commit()
+# ---------- event helpers ----------
 
+# Map incoming event dict keys to DB columns (best-effort).
+_EVENT_COLUMNS = {
+    "source",
+    "external_id",
+    "title",
+    "category",
+    "start_time",
+    "city",
+    "country",
+    "venue_name",
+    "min_price",
+    "currency",
+    "url",
+}
 
-def get_preferences(user_id: str) -> Dict[str, Any] | None:
-    with _lock, _conn() as cx:
-        cur = cx.execute(
-            "SELECT * FROM user_prefs WHERE user_id=?", (user_id,))
+def _normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
+    # Keep only columns we know about; missing values become None
+    return {k: e.get(k) for k in _EVENT_COLUMNS}
+
+def save_event(event: Dict[str, Any]) -> int:
+    """
+    Insert an event (deduped on source+external_id). Returns the row id of the existing/new row.
+    """
+    data = _normalize_event(event)
+    if not data.get("source") or not data.get("external_id"):
+        raise ValueError("save_event requires 'source' and 'external_id'")
+
+    cols = ", ".join(data.keys())
+    placeholders = ", ".join([":" + k for k in data.keys()])
+
+    with _db() as conn:
+        cur = conn.cursor()
+        # Try insert; if conflict, select existing id
+        cur.execute(
+            f"""
+            INSERT OR IGNORE INTO events ({cols}) VALUES ({placeholders})
+            """,
+            data,
+        )
+        if cur.lastrowid:  # new row
+            return int(cur.lastrowid)
+
+        # conflict -> fetch id
+        cur.execute(
+            "SELECT id FROM events WHERE source = ? AND external_id = ?",
+            (data["source"], data["external_id"]),
+        )
         row = cur.fetchone()
-        if not row:
-            return None
-        return {
-            "home_city": row["home_city"],
-            "home_country": row["home_country"],
-            "passions": json.loads(row["passions"] or "[]")
-        }
+        return int(row["id"]) if row else 0
 
-
-def upsert_subscription(user_id: str, frequency: str = "weekly"):
-    with _lock, _conn() as cx:
-        cx.execute("""
-            INSERT INTO subs(user_id, frequency, last_sent_at)
-            VALUES (?, ?, NULL)
-            ON CONFLICT(user_id) DO UPDATE SET frequency=excluded.frequency
-        """, (user_id, frequency))
-        cx.commit()
-
-
-def list_subscriptions() -> List[Dict[str, Any]]:
-    with _lock, _conn() as cx:
-        cur = cx.execute("SELECT * FROM subs")
-        rows = [dict(r) for r in cur.fetchall()]
-    # enrich with prefs
-    for r in rows:
-        prefs = get_preferences(r["user_id"]) or {}
-        r.update(prefs)
-        if r.get("last_sent_at"):
-            r["last_sent_at"] = datetime.fromisoformat(r["last_sent_at"])
-    return rows
-
-
-def bump_subscription_seen(user_id: str):
-    with _lock, _conn() as cx:
-        cx.execute("UPDATE subs SET last_sent_at=? WHERE user_id=?",
-                   (datetime.utcnow().isoformat(), user_id))
-        cx.commit()
-
-
-def save_digest(user_id: str, items: List[Dict[str, Any]]):
-    with _lock, _conn() as cx:
-        cx.execute("INSERT INTO digests(user_id, payload, created_at) VALUES (?, ?, ?)",
-                   (user_id, json.dumps(items), datetime.utcnow().isoformat()))
-        cx.commit()
-
-
-def pop_digest(user_id: str) -> Optional[List[Dict[str, Any]]]:
-    with _lock, _conn() as cx:
-        cur = cx.execute(
-            "SELECT rowid, payload FROM digests WHERE user_id=? ORDER BY created_at ASC", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        cx.execute("DELETE FROM digests WHERE rowid=?", (row["rowid"],))
-        cx.commit()
-    return json.loads(row["payload"])
-
-
-def log_event_search(user_id: str, payload: Dict[str, Any], count: int):
-    with _lock, _conn() as cx:
-        cx.execute("INSERT INTO search_log(user_id, payload, count, created_at) VALUES (?, ?, ?, ?)",
-                   (user_id, json.dumps(payload), count, datetime.utcnow().isoformat()))
-        cx.commit()
+def get_saved_events(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, source, external_id, title, category, start_time, city, country,
+                   venue_name, min_price, currency, url, saved_at
+            FROM events
+            ORDER BY saved_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
