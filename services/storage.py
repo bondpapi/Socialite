@@ -1,40 +1,28 @@
-# services/storage.py
 from __future__ import annotations
 
-import os
 import sqlite3
-from contextlib import contextmanager
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List
 
-DB_PATH = os.getenv("DB_PATH", "social_agent.db")
-
-# ---------- low-level helpers ----------
+# Put DB alongside your repo root, same as services/metrics.py
+DB_PATH = Path(__file__).resolve().parent.parent / "social_agent.db"
 
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-@contextmanager
-def _db():
-    conn = _connect()
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-# ---------- schema & init ----------
+# -------------------- schema / init --------------------
 
 def init_db() -> None:
     """
-    Creates tables if they don't exist. Safe to call repeatedly.
+    Create tables needed by the app. Safe to call multiple times.
     """
-    with _db() as conn:
-        c = conn.cursor()
-
-        # Saved events (dedupe on source + external_id)
-        c.execute(
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _connect() as conn:
+        cur = conn.cursor()
+        # Saved events table. We dedupe by (source, external_id)
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,28 +37,15 @@ def init_db() -> None:
                 min_price REAL,
                 currency TEXT,
                 url TEXT,
-                saved_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                saved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (source, external_id)
             )
             """
         )
+        conn.commit()
 
-        # Optional: metrics table (some middleware uses this)
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS hits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT DEFAULT CURRENT_TIMESTAMP,
-                route TEXT,
-                status INTEGER,
-                elapsed_ms REAL
-            )
-            """
-        )
+# -------------------- helpers --------------------
 
-# ---------- event helpers ----------
-
-# Map incoming event dict keys to DB columns (best-effort).
 _EVENT_COLUMNS = {
     "source",
     "external_id",
@@ -85,34 +60,32 @@ _EVENT_COLUMNS = {
     "url",
 }
 
-def _normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
-    # Keep only columns we know about; missing values become None
+def _sanitize_event(e: Dict[str, Any]) -> Dict[str, Any]:
+    # Keep only known columns; missing values become None
     return {k: e.get(k) for k in _EVENT_COLUMNS}
 
 def save_event(event: Dict[str, Any]) -> int:
     """
-    Insert an event (deduped on source+external_id). Returns the row id of the existing/new row.
+    Insert (or no-op if duplicate) and return the row id.
+    Requires 'source' and 'external_id'.
     """
-    data = _normalize_event(event)
+    data = _sanitize_event(event)
     if not data.get("source") or not data.get("external_id"):
         raise ValueError("save_event requires 'source' and 'external_id'")
 
     cols = ", ".join(data.keys())
     placeholders = ", ".join([":" + k for k in data.keys()])
 
-    with _db() as conn:
+    with _connect() as conn:
         cur = conn.cursor()
-        # Try insert; if conflict, select existing id
         cur.execute(
-            f"""
-            INSERT OR IGNORE INTO events ({cols}) VALUES ({placeholders})
-            """,
+            f"INSERT OR IGNORE INTO events ({cols}) VALUES ({placeholders})",
             data,
         )
-        if cur.lastrowid:  # new row
+        if cur.lastrowid:
             return int(cur.lastrowid)
 
-        # conflict -> fetch id
+        # already existed; return existing id
         cur.execute(
             "SELECT id FROM events WHERE source = ? AND external_id = ?",
             (data["source"], data["external_id"]),
@@ -121,7 +94,7 @@ def save_event(event: Dict[str, Any]) -> int:
         return int(row["id"]) if row else 0
 
 def get_saved_events(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    with _db() as conn:
+    with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
             """
