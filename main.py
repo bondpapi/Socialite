@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from social_agent_ai.middleware import MetricsMiddleware
-from social_agent_ai.routers import (
+from middleware import MetricsMiddleware
+from routers import (
     events as events_router,
     providers as providers_router,
     saved as saved_router,
@@ -13,7 +13,7 @@ from social_agent_ai.routers import (
     auth as auth_router,
     profile as profile_router,
 )
-from social_agent_ai.scheduler import start_background_scheduler
+from scheduler import start_background_scheduler
 
 app = FastAPI(title="Socialite API")
 
