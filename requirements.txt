@@ -18,3 +18,7 @@ beautifulsoup4>=4.12.3
 dateparser>=1.2.0
 setuptools>=68
 beautifulsoup4==4.12.3
+streamlit==1.38.0
+requests==2.32.3
+pandas==2.2.2
+python-dateutil==2.9.0.post0

@@ -1,35 +1,38 @@
-# ---------- Dockerfile (API-only) ----------
-FROM python:3.11-slim
+# Use a mirror for the official python image to avoid Docker Hub 503/limits
+ARG BASE_IMAGE=public.ecr.aws/docker/library/python:3.11-slim
+FROM ${BASE_IMAGE}
 
-# System deps (curl only for healthchecks / debugging)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  curl \
-  && rm -rf /var/lib/apt/lists/*
-
-# Faster, reliable installs
-ENV PIP_NO_CACHE_DIR=1 \
-  PIP_DISABLE_PIP_VERSION_CHECK=1 \
+ENV PYTHONUNBUFFERED=1 \
   PYTHONDONTWRITEBYTECODE=1 \
-  PYTHONUNBUFFERED=1
+  API_PORT=8000 \
+  UI_PORT=8501
 
+# Workdir
 WORKDIR /app
 
-# Install python deps first (for layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# System deps and tini for PID 1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  build-essential curl tini \
+  && rm -rf /var/lib/apt/lists/*
 
-# Copy the rest of the app
+# Python deps (cache layer) then install
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+  pip install --upgrade pip \
+  && pip install -r requirements.txt
+
+# App code
 COPY . .
 
-# Render will inject $PORT; default to 8000 when running locally
-ENV PORT=8000
-
-# Expose the (internal) port for local runs; Render maps externally for you
-EXPOSE 8000
-
-# Optional healthcheck (switch to /healthz if you have it)
+# Healthcheck (curl the API docs)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
-  CMD curl -fsS "http://127.0.0.1:${PORT}/docs" >/dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:${API_PORT}/docs" >/dev/null || exit 1
 
-# Start FastAPI with uvicorn on the port Render provides
-CMD ["/bin/sh", "-lc", "uvicorn social_agent_ai.main:app --host 0.0.0.0 --port ${PORT}"]
+# tini forwards signals to our processes
+ENTRYPOINT ["/usr/bin/tini","--"]
+
+# Start API (background) and Streamlit in the foreground
+CMD ["/bin/sh","-lc", \
+  "uvicorn main:app --host 0.0.0.0 --port $API_PORT & \
+  exec streamlit run app.py --server.port=$UI_PORT --server.address=0.0.0.0" \
+  ]

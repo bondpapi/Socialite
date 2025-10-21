@@ -5,8 +5,10 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+
 class LoginIn(BaseModel):
     username: str
+
 
 @router.post("/mock-login")
 def mock_login(payload: LoginIn) -> dict:
