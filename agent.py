@@ -1,15 +1,16 @@
 from __future__ import annotations
-import os, json
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+
+import json
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 from pydantic import BaseModel
 
-from aggregator import search_events
+from services.aggregator import search_events
 from services import storage
 
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+_client = OpenAI()
 
 SYSTEM_PROMPT = """You are Socialite — a friendly, efficient AI agent that finds
 and plans real-world events. You:
@@ -33,14 +34,27 @@ TOOLS = [
                 "properties": {
                     "city": {"type": "string"},
                     "country": {"type": "string", "description": "ISO-2 country code"},
-                    "days_ahead": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30},
-                    "start_in_days": {"type": "integer", "minimum": 0, "maximum": 365, "default": 0},
+                    "days_ahead": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 365,
+                        "default": 30,
+                    },
+                    "start_in_days": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 365,
+                        "default": 0,
+                    },
                     "include_mock": {"type": "boolean", "default": False},
-                    "query": {"type": "string", "description": "Keyword like 'tech', 'sports', 'jazz'."}
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword like 'tech', 'sports', 'jazz'.",
+                    },
                 },
-                "required": ["city", "country"]
-            }
-        }
+                "required": ["city", "country"],
+            },
+        },
     },
     {
         "type": "function",
@@ -52,18 +66,18 @@ TOOLS = [
                 "properties": {
                     "home_city": {"type": "string"},
                     "home_country": {"type": "string"},
-                    "passions": {"type": "array", "items": {"type": "string"}}
-                }
-            }
-        }
+                    "passions": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "tool_get_preferences",
             "description": "Fetch stored preferences for personalization.",
-            "parameters": { "type": "object", "properties": {} }
-        }
+            "parameters": {"type": "object", "properties": {}},
+        },
     },
     {
         "type": "function",
@@ -74,10 +88,10 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "frequency": {"type": "string", "enum": ["daily", "weekly"], "default": "weekly"}
-                }
-            }
-        }
-    }
+                },
+            },
+        },
+    },
 ]
 
 # ---- Local tool dispatchers ----
@@ -91,9 +105,9 @@ def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         include_mock=bool(args.get("include_mock", False)),
         query=args.get("query"),
     )
-
     storage.log_event_search(user_id, args, count=data.get("count", 0))
     return data
+
 
 def tool_save_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     storage.save_preferences(
@@ -104,14 +118,17 @@ def tool_save_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {"ok": True}
 
+
 def tool_get_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     prefs = storage.get_preferences(user_id) or {}
     return {"preferences": prefs}
+
 
 def tool_subscribe_digest(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     freq = args.get("frequency", "weekly")
     storage.upsert_subscription(user_id, frequency=freq)
     return {"ok": True, "frequency": freq}
+
 
 TOOL_MAP = {
     "tool_search_events": tool_search_events,
@@ -126,13 +143,23 @@ class AgentTurn(BaseModel):
     reply: str
     used_tools: List[str] = []
 
+
+def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
+    if not s:
+        return {}
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+
 def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTurn:
-    messages = [
+    messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": message},
     ]
 
-    # 1st LLM call
+    # Initial LLM call
     resp = _client.chat.completions.create(
         model=model,
         messages=messages,
@@ -144,21 +171,23 @@ def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTu
     used_tools: List[str] = []
     msg = resp.choices[0].message
 
+    # Tool loop
     while getattr(msg, "tool_calls", None):
         for call in msg.tool_calls:
             name = call.function.name
-            args = json.loads(call.function.arguments or "{}")
+            args = _safe_json_loads(call.function.arguments)
             fn = TOOL_MAP.get(name)
+
             if not fn:
                 tool_result = {"error": f"Unknown tool {name}"}
             else:
                 tool_result = fn(user_id, args)
                 used_tools.append(name)
 
-            # append tool result back into context
+            # echo tool call + result back to the model
             messages.append({
                 "role": "assistant",
-                "tool_calls": [call]  # echo the call we just handled
+                "tool_calls": [call],
             })
             messages.append({
                 "role": "tool",
