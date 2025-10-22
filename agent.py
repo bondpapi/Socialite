@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 from pydantic import BaseModel
 
-from .aggregator import search_events
-from .services import storage
+from aggregator import search_events
+from services import storage
 
 _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 

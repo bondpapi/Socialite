@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from social_agent_ai.services.metrics import summary_http, timeline_http, summary_llm
+from services.metrics import summary_http, timeline_http, summary_llm
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 

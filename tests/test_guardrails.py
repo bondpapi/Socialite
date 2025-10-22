@@ -1,5 +1,5 @@
 from datetime import date
-from social_agent_ai.services.guardrails import is_allowed_event
+from services.guardrails import is_allowed_event
 
 
 def test_minor_blocked_adult():

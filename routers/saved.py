@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
-from social_agent_ai.services import storage
+from services import storage
 
 router = APIRouter(prefix="/users", tags=["saved"])
 

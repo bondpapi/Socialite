@@ -1,9 +1,6 @@
 from __future__ import annotations
 from typing import Iterable
 
-# super-simple scorer: prefer category/keywords matches
-
-
 def score_event(event: dict, passions: list[str]) -> float:
     base = 0.0
     title = (event.get("title") or "").lower()

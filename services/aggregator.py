@@ -1,124 +1,152 @@
+"""
+Provider aggregation for Socialite.
+
+To avoid exporting module-level mutable state that can trigger circular import
+problems during app startup. Instead, we discover providers dynamically and
+expose functions.
+"""
+
 from __future__ import annotations
 
 import importlib
-import inspect
-import logging
 import pkgutil
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-logger = logging.getLogger(__name__)
+# ---- Provider discovery ------------------------------------------------------
+
+@dataclass(frozen=True)
+class ProviderInfo:
+    key: str
+    name: str
+    module: str
+    search: Callable[..., List[Dict[str, Any]]]
 
 
-SearchFn = Callable[..., Iterable[dict]]
-
-def _discover_providers() -> Dict[str, SearchFn]:
-    """
-    Dynamically import modules under the `providers` package and collect any
-    top-level callable named `search`. The key is the module's short name.
-    """
-    found: Dict[str, SearchFn] = {}
-
-    try:
-        pkg = importlib.import_module("providers")
-    except Exception as e:
-        logger.exception("Failed to import providers package: %s", e)
-        return found
-
-    if not hasattr(pkg, "__path__"):
-        return found
-
-    for m in pkgutil.iter_modules(pkg.__path__, prefix="providers."):
-        mod_name = m.name
-        short = mod_name.split(".")[-1]  # e.g. providers.eventbrite -> eventbrite
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception as e:
-            logger.warning("Provider %s failed to import: %s", mod_name, e)
+def _iter_provider_modules() -> Iterable[str]:
+    """Yield dotted-module names for all modules in the 'providers' package."""
+    pkg_name = "providers"
+    pkg = importlib.import_module(pkg_name)
+    for m in pkgutil.iter_modules(pkg.__path__):  # type: ignore[attr-defined]
+        if m.name.startswith("_"):
             continue
-
-        search = getattr(mod, "search", None)
-        if callable(search):
-            found[short] = search  # type: ignore[assignment]
-        else:
-            # Optional: allow a PROVIDER object exposing a .search(...) method
-            prov = getattr(mod, "PROVIDER", None)
-            if prov is not None and callable(getattr(prov, "search", None)):
-                found[short] = prov.search  # type: ignore[assignment]
-            else:
-                logger.debug("Provider %s has no search()", mod_name)
-
-    return found
+        yield f"{pkg_name}.{m.name}"
 
 
-# Build once at import; safe even if empty.
-_PROVIDERS: Dict[str, SearchFn] = _discover_providers()
-
-
-def get_providers(include_mock: bool = False,
-                  allow_only: Optional[Iterable[str]] = None) -> Dict[str, SearchFn]:
+def _load_provider(module_name: str) -> Optional[ProviderInfo]:
     """
-    Return a filtered dict of available providers.
-    - include_mock=False filters out modules named 'mock' (common pattern)
-    - allow_only restricts to a given subset by name
+    Attempt to import a provider module and read its metadata.
+    A provider module should define at least a callable named `search`.
+    It may optionally define NAME = "Human Friendly Name".
     """
-    providers = dict(_PROVIDERS)
-
-    if not include_mock:
-        providers.pop("mock", None)
-
-    if allow_only is not None:
-        allow = {name.lower() for name in allow_only}
-        providers = {k: v for k, v in providers.items() if k.lower() in allow}
-
-    return providers
+    mod = importlib.import_module(module_name)
+    search = getattr(mod, "search", None)
+    if not callable(search):
+        return None
+    name = getattr(mod, "NAME", module_name.rsplit(".", 1)[-1].title())
+    key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1])
+    return ProviderInfo(key=key, name=name, module=module_name, search=search)  # type: ignore[return-value]
 
 
-def search_events(*,
-                  city: str,
-                  country: str,
-                  days_ahead: int,
-                  start_in_days: int = 0,
-                  query: Optional[str] = None,
-                  include_mock: bool = False,
-                  providers: Optional[Iterable[str]] = None,
-                  extra_kwargs: Optional[dict] = None) -> Dict[str, Any]:
+def _discover_providers() -> List[ProviderInfo]:
+    out: List[ProviderInfo] = []
+    for dotted in _iter_provider_modules():
+        p = _load_provider(dotted)
+        if p:
+            out.append(p)
+    out.sort(key=lambda p: p.key)
+    return out
+
+
+# ---- Public API --------------------------------------------------------------
+
+def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
     """
-    Aggregate events across available providers.
-
-    Returns a dict like:
-      {"count": N, "items": [ {...event...}, ... ]}
-
-    Each provider's `search` is called with the standard kwargs plus any extra_kwargs.
+    Returns lightweight provider metadata for UI.
+    If include_mock is False, filters out providers whose key contains 'mock'.
     """
-    params = dict(
+    providers = _discover_providers()
+    if include_mock is False:
+        providers = [p for p in providers if "mock" not in p.key.lower()]
+    return [{"key": p.key, "name": p.name, "module": p.module} for p in providers]
+
+
+# --- Your original sync search (renamed) -------------------------------------
+
+def search_events_sync(
+    *,
+    city: str,
+    country: str,
+    days_ahead: int = 60,
+    start_in_days: int = 0,
+    include_mock: bool = False,
+    query: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Fan-out to all discovered providers, aggregate and return a unified payload.
+
+    Each provider's `search` should accept (city, country, days_ahead, start_in_days, query)
+    and return List[dict] items with at least keys:
+        title, start_time (ISO), city, country, source, url, category, venue_name, currency, min_price
+    """
+    items: List[Dict[str, Any]] = []
+    providers = _discover_providers()
+    for p in providers:
+        if not include_mock and "mock" in p.key.lower():
+            continue
+        try:
+            chunk = p.search(
+                city=city,
+                country=country,
+                days_ahead=days_ahead,
+                start_in_days=start_in_days,
+                query=query,
+            )
+            if isinstance(chunk, list):
+                for e in chunk:
+                    e.setdefault("source", p.key)
+                items.extend(chunk)
+        except Exception as exc:  # Keep a provider failure from taking down the page
+            items.append(
+                {
+                    "title": f"[{p.key}] provider error",
+                    "category": "provider_error",
+                    "city": city,
+                    "country": country,
+                    "start_time": None,
+                    "url": None,
+                    "venue_name": None,
+                    "currency": None,
+                    "min_price": None,
+                    "error": str(exc),
+                    "source": p.key,
+                }
+            )
+
+    return {
+        "count": len(items),
+        "items": items,
+        "providers_used": [p.key for p in providers if include_mock or "mock" not in p.key.lower()],
+    }
+
+
+async def search_events(
+    *,
+    city: str,
+    country: str,
+    days_ahead: int = 60,
+    start_in_days: int = 0,
+    include_mock: bool = False,
+    query: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Async façade delegating to the sync implementation so router code can `await` it.
+    """
+    return search_events_sync(
         city=city,
         country=country,
         days_ahead=days_ahead,
         start_in_days=start_in_days,
+        include_mock=include_mock,
         query=query,
     )
-    if extra_kwargs:
-        params.update(extra_kwargs)
-
-    registry = get_providers(include_mock=include_mock, allow_only=providers)
-
-    items: List[dict] = []
-    for name, fn in registry.items():
-        try:
-            result = fn(**params) if _accepts_kwargs(fn) else fn(city, country, days_ahead)  # type: ignore[misc]
-            if result:
-                items.extend(list(result))
-        except Exception as e:
-            logger.warning("Provider %s.search failed: %s", name, e)
-
-    return {"count": len(items), "items": items}
-
-
-def _accepts_kwargs(fn: Callable[..., Any]) -> bool:
-    """Return True if function accepts **kwargs (or the full param set)."""
-    sig = inspect.signature(fn)
-    if any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
-        return True
-    expected = {"city", "country", "days_ahead", "start_in_days", "query"}
-    have = set(sig.parameters.keys())
-    return expected.issubset(have)

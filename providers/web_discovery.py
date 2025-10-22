@@ -7,9 +7,9 @@ import json
 
 import requests
 
-from social_agent_ai.utils.http_client import HttpClient
-from social_agent_ai.utils.cache import FileCache
-from social_agent_ai.config import settings
+from utils.http_client import HttpClient
+from utils.cache import FileCache
+from config import settings
 
 logger = logging.getLogger(__name__)
 

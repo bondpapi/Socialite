@@ -3,9 +3,8 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from .services import storage
-from .aggregator import search_events
-
+from services import storage
+from aggregator import search_events
 
 def _tick():
     """

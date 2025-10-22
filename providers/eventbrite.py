@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from social_agent_ai.utils.http_client import HttpClient
+from utils.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
 
