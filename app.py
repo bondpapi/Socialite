@@ -7,10 +7,15 @@ import streamlit as st
 
 # ------------------ Config / API base ------------------
 def _get_api_base() -> str:
-    # Streamlit Cloud secrets > ENV var > localhost default
-    if hasattr(st, "secrets") and "API_BASE" in st.secrets:
-        return st.secrets["API_BASE"].rstrip("/")
-    return os.environ.get("API_BASE", "http://127.0.0.1:8000").rstrip("/")
+    try:
+        if getattr(st, "secrets", None) and "API_BASE" in st.secrets:
+            return str(st.secrets["API_BASE"]).rstrip("/")
+    except Exception:
+        pass
+    val = os.environ.get("API_BASE")
+    if val:
+        return val.rstrip("/")
+    return "http://127.0.0.1:8000"
 
 
 API_BASE = _get_api_base()
