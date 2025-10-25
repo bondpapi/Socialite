@@ -24,28 +24,43 @@ class ProviderInfo:
 
 
 def _iter_provider_modules() -> Iterable[str]:
-    """Yield dotted-module names for all modules in the 'providers' package."""
     pkg_name = "providers"
-    pkg = importlib.import_module(pkg_name)
+    try:
+        pkg = importlib.import_module(pkg_name)
+    except ModuleNotFoundError:
+        return []
+    except Exception:
+        return []
+
     for m in pkgutil.iter_modules(pkg.__path__):  # type: ignore[attr-defined]
-        if m.name.startswith("_"):
-            continue
-        yield f"{pkg_name}.{m.name}"
+        if not m.name.startswith("_"):
+            yield f"{pkg_name}.{m.name}"
 
 
 def _load_provider(module_name: str) -> Optional[ProviderInfo]:
-    """
-    Attempt to import a provider module and read its metadata.
-    A provider module should define at least a callable named `search`.
-    It may optionally define NAME = "Human Friendly Name".
-    """
-    mod = importlib.import_module(module_name)
+    try:
+        mod = importlib.import_module(module_name)
+    except Exception:
+        return None
+
     search = getattr(mod, "search", None)
     if not callable(search):
         return None
     name = getattr(mod, "NAME", module_name.rsplit(".", 1)[-1].title())
     key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1])
-    return ProviderInfo(key=key, name=name, module=module_name, search=search)  # type: ignore[return-value]
+    return ProviderInfo(key=key, name=name, module=module_name, search=search)
+
+
+def _discover_providers() -> List[ProviderInfo]:
+    out: List[ProviderInfo] = []
+    modules = list(_iter_provider_modules()) or []  # tolerate empty
+    for dotted in modules:
+        p = _load_provider(dotted)
+        if p:
+            out.append(p)
+    out.sort(key=lambda p: p.key)
+    return out
+
 
 
 def _discover_providers() -> List[ProviderInfo]:
