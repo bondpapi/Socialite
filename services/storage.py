@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DB_PATH = Path(__file__).resolve().parent.parent / "social_agent.db"
 
+
 # ---------- DB helpers ----------
 
 def _connect() -> sqlite3.Connection:
