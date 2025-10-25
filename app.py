@@ -1,9 +1,15 @@
 import os
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
+
 import pandas as pd
 import requests
 import streamlit as st
+
+# -------------------------------------------------
+# Page config (must be the first Streamlit call)
+# -------------------------------------------------
+st.set_page_config(page_title="Socialite", layout="wide")
 
 # ------------------ Config / API base ------------------
 def _get_api_base() -> str:
@@ -17,12 +23,14 @@ def _get_api_base() -> str:
         return val.rstrip("/")
     return "http://127.0.0.1:8000"
 
-
 API_BASE = _get_api_base()
 DEFAULT_CITY = os.getenv("DEFAULT_CITY", "Kaunas")
 DEFAULT_COUNTRY = os.getenv("DEFAULT_COUNTRY", "LT")
 
-st.set_page_config(page_title="Socialite", layout="wide")
+# Tunable HTTP behaviour
+CONNECT_READ_TIMEOUT: Tuple[float, float] = (5.0, 180.0)  # (connect, read)
+RETRY_ON_TIMEOUT = 1  # warm + retry once if the first call times out
+
 
 # ------------------ Session state ------------------
 if "user" not in st.session_state:
@@ -33,26 +41,64 @@ if "saved" not in st.session_state:
     st.session_state.saved = []
 if "chatlog" not in st.session_state:
     st.session_state.chatlog = []
+if "api_health" not in st.session_state:
+    st.session_state.api_health = None  # will be set below
 
-# ------------------ Helpers ------------------
+
+# ------------------ Low-level HTTP helpers ------------------
+def _url(path: str) -> str:
+    return f"{API_BASE}{path}"
+
+def _warm_api():
+    try:
+        requests.get(_url("/health"), timeout=(2, 10))
+    except Exception:
+        # swallow — warm attempt only
+        pass
+
+def _request_with_retry(method: str, path: str, *, params=None, json_body=None):
+    """
+    Perform an HTTP request with (connect, read) timeout and a single warm-retry
+    if we hit a ReadTimeout (useful for cold starts on free tiers).
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(RETRY_ON_TIMEOUT + 1):
+        try:
+            if method == "GET":
+                r = requests.get(
+                    _url(path), params=params or {}, timeout=CONNECT_READ_TIMEOUT
+                )
+            else:
+                r = requests.post(
+                    _url(path), json=json_body or {}, timeout=CONNECT_READ_TIMEOUT
+                )
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.ReadTimeout as e:
+            last_exc = e
+            if attempt == 0 and RETRY_ON_TIMEOUT > 0:
+                _warm_api()
+                continue
+            raise
+        except Exception as e:
+            # propagate any non-timeout error immediately
+            raise
+    if last_exc:
+        raise last_exc
+
 def _api_get(path: str, params=None):
-    r = requests.get(f"{API_BASE}{path}", params=params, timeout=60)
-    r.raise_for_status()
-    return r.json()
-
+    return _request_with_retry("GET", path, params=params)
 
 def _api_post(path: str, json_body=None):
-    r = requests.post(f"{API_BASE}{path}", json=json_body, timeout=60)
-    r.raise_for_status()
-    return r.json()
+    return _request_with_retry("POST", path, json_body=json_body)
 
 
+# ------------------ API wrappers ------------------
 def _fetch_profile(user_id: str):
     try:
         return _api_get(f"/profile/{user_id}")
     except Exception:
         return {}
-
 
 def _save_profile(user_id: str, home_city: str, home_country: str, passions: List[str]):
     payload = {
@@ -61,7 +107,6 @@ def _save_profile(user_id: str, home_city: str, home_country: str, passions: Lis
         "passions": passions or [],
     }
     return _api_post(f"/profile/{user_id}", payload)
-
 
 def _search_events(city, country, days_ahead, start_in_days, include_mock, query):
     params = {
@@ -75,14 +120,41 @@ def _search_events(city, country, days_ahead, start_in_days, include_mock, query
         params["query"] = query
     return _api_get("/events/search", params)
 
-
 def _agent_chat(user_id: str, message: str):
     payload = {"user_id": user_id, "message": message}
     return _api_post("/agent/chat", payload)
 
-
 def _read_digest(user_id: str):
     return _api_get(f"/agent/digest/{user_id}")
+
+
+# ------------------ Header / API health chip ------------------
+def _probe_health():
+    try:
+        j = _api_get("/health")
+        st.session_state.api_health = (True, j)
+    except Exception as e:
+        st.session_state.api_health = (False, str(e))
+
+health_ok, health_info = (None, None)
+try:
+    if st.session_state.api_health is None:
+        _probe_health()
+    health_ok, health_info = st.session_state.api_health
+except Exception:
+    pass
+
+st.title("Socialite")
+status_col1, status_col2 = st.columns([0.8, 0.2])
+with status_col1:
+    st.caption(f"API: `{API_BASE}`")
+with status_col2:
+    if health_ok is True:
+        st.success("API ✓", icon="✅")
+    elif health_ok is False:
+        st.warning("API warming…", icon="⏳")
+    else:
+        st.info("API status unknown", icon="ℹ️")
 
 
 # ------------------ Sidebar (search form) ------------------
@@ -90,14 +162,12 @@ with st.sidebar:
     st.header("Search")
     city = st.text_input("City", value=DEFAULT_CITY)
     country = st.text_input("Country (ISO-2)", value=DEFAULT_COUNTRY)
-    start_in_days = st.number_input(
-        "Start in (days)", min_value=0, value=0, step=1)
+    start_in_days = st.number_input("Start in (days)", min_value=0, value=0, step=1)
     days_ahead = st.number_input("Days ahead", min_value=1, value=120, step=1)
     query = st.text_input("Keyword (optional)", value="sports")
     include_mock = st.checkbox("Include mock data", value=False)
     run_search = st.button("🔎 Search")
 
-st.title("Socialite")
 
 tabs = st.tabs(["Discover", "Chat 🤖", "Settings"])
 
@@ -109,7 +179,8 @@ with tabs[0]:
         with st.spinner("Finding events..."):
             try:
                 data = _search_events(
-                    city, country, days_ahead, start_in_days, include_mock, query)
+                    city, country, days_ahead, start_in_days, include_mock, query
+                )
                 items = data.get("items", [])
                 st.session_state.last_results = items
                 count = data.get("count", len(items))
@@ -129,8 +200,7 @@ with tabs[0]:
         st.caption("Showing last results (cached). Click **Search** to refresh.")
 
     if not items:
-        st.info(
-            "No events matched. Try broadening search or increasing the date range.")
+        st.info("No events matched. Try broadening search or increasing the date range.")
     else:
         # Top controls
         left, right = st.columns([1, 1])
@@ -171,8 +241,7 @@ with tabs[0]:
                 if e.get("start_time"):
                     meta.append(f"**Start:** {e['start_time']}")
                 if e.get("min_price") is not None:
-                    meta.append(
-                        f"**From:** {e['min_price']} {e.get('currency', '')}".strip())
+                    meta.append(f"**From:** {e['min_price']} {e.get('currency', '')}".strip())
                 if meta:
                     st.write(" • ".join(meta))
                 if e.get("url"):
@@ -190,17 +259,14 @@ with tabs[1]:
     st.header("Chat with Socialite 🤖")
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
-        username = st.text_input(
-            "Username", value=st.session_state.user["username"])
+        username = st.text_input("Username", value=st.session_state.user["username"])
     with col2:
-        user_id = st.text_input(
-            "User ID", value=st.session_state.user["user_id"])
+        user_id = st.text_input("User ID", value=st.session_state.user["user_id"])
     with col3:
         if st.button("Login (mock)"):
             try:
                 out = _api_post("/auth/mock-login", {"username": username})
-                st.session_state.user = {
-                    "user_id": out["user_id"], "username": username}
+                st.session_state.user = {"user_id": out["user_id"], "username": username}
                 st.success(f"Signed in as {username} ({out['user_id']})")
             except Exception as e:
                 st.error(f"Login failed: {e}")
@@ -215,8 +281,7 @@ with tabs[1]:
         with st.chat_message(role):
             st.write(text)
 
-    prompt = st.chat_input(
-        "Ask me for plans, search something, or 'subscribe me weekly' …")
+    prompt = st.chat_input("Ask me for plans, search something, or 'subscribe me weekly' …")
     if prompt:
         st.session_state.chatlog.append(("user", prompt))
         with st.chat_message("assistant"):
@@ -242,12 +307,12 @@ with tabs[1]:
                     st.success(f"Got {len(items)} new picks for you:")
                     for e in items:
                         st.markdown(
-                            f"- **{e.get('title', '(untitled)')}** — {e.get('city', '')} {e.get('country', '')}")
+                            f"- **{e.get('title', '(untitled)')}** — {e.get('city', '')} {e.get('country', '')}"
+                        )
             except Exception as e:
                 st.error(f"Digest error: {e}")
     with c2:
-        st.caption(
-            "Digest is produced by the server scheduler. Use Settings to set your city & passions.")
+        st.caption("Digest is produced by the server scheduler. Use Settings to set your city & passions.")
 
 # ------------------ Settings Tab ------------------
 with tabs[2]:
@@ -265,14 +330,12 @@ with tabs[2]:
         home_city = st.text_input("Home city", value=ph_city)
         home_country = st.text_input("Home country (ISO-2)", value=ph_country)
     with s2:
-        passions_raw = st.text_input(
-            "Passions (comma-separated)", value=ph_passions)
+        passions_raw = st.text_input("Passions (comma-separated)", value=ph_passions)
 
     if st.button("💾 Save preferences"):
         passions = [p.strip() for p in passions_raw.split(",") if p.strip()]
         try:
-            _save_profile(
-                st.session_state.user["user_id"], home_city, home_country, passions)
+            _save_profile(st.session_state.user["user_id"], home_city, home_country, passions)
             st.success("Preferences saved.")
         except Exception as e:
             st.error(f"Save failed: {e}")
