@@ -1,11 +1,8 @@
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
 import logging
 from datetime import datetime, timedelta, timezone
-
 import requests
-
 from utils.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
@@ -16,7 +13,6 @@ BASE_URL = "https://www.eventbriteapi.com/v3"
 def _iso(dt: datetime) -> str:
     # Eventbrite expects UTC ISO with 'Z'
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 def search(
     *,

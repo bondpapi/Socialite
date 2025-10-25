@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 from pydantic import BaseModel
 
-from services.aggregator import search_events
+from services.aggregator import search_events_sync
 from services import storage
 
 
@@ -97,16 +97,17 @@ TOOLS = [
 # ---- Local tool dispatchers ----
 
 def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    data = search_events(
+    data = search_events_sync(
         city=args["city"],
         country=args["country"],
         days_ahead=int(args.get("days_ahead", 30)),
         start_in_days=int(args.get("start_in_days", 0)),
-        include_mock=bool(args.get("include_mock", False)),
+        include_mock=bool(args.get("include_mock", False)),  # consider True while testing
         query=args.get("query"),
     )
     storage.log_event_search(user_id, args, count=data.get("count", 0))
     return data
+
 
 
 def tool_save_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
