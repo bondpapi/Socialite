@@ -61,6 +61,17 @@ def _init():
         )
         """)
 
+        # -------- NEW: digest outbox (for scheduler -> streamlit) ----------
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS digests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            payload TEXT NOT NULL,  -- JSON array of event items
+            ts DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_digests_userid ON digests(user_id)")
+
         conn.commit()
 
 
@@ -184,3 +195,50 @@ def log_event_search(user_id: str, args: Dict[str, Any], count: int) -> None:
             (user_id, json.dumps(args), int(count))
         )
         conn.commit()
+
+
+# ---------- NEW: Digest outbox (used by routers/agent.py) ----------
+
+def save_digest(user_id: str, *, items: List[Dict[str, Any]]) -> None:
+    """
+    Append a digest for a user. Your scheduler can call this to enqueue picks.
+    Streamlit will later fetch them via /agent/digest/{user_id}.
+    """
+    payload = json.dumps(items or [])
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO digests (user_id, payload) VALUES (?, ?)",
+            (user_id, payload),
+        )
+        conn.commit()
+
+
+def pop_digest(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Atomically return one pending digest for the user and delete it.
+    If none pending, returns [].
+    """
+    with _connect() as conn:
+        # Make the select+delete atomic
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, payload FROM digests WHERE user_id = ? ORDER BY id ASC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+
+        if not row:
+            conn.commit()
+            return []
+
+        digest_id = row["id"]
+        raw = row["payload"] or "[]"
+        try:
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                items = []
+        except Exception:
+            items = []
+
+        conn.execute("DELETE FROM digests WHERE id = ?", (digest_id,))
+        conn.commit()
+        return items
