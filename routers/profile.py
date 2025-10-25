@@ -24,3 +24,10 @@ def save_profile(user_id: str, payload: ProfileIn) -> dict:
         passions=payload.passions or [],
     )
     return {"ok": True}
+
+storage.save_preferences(
+    user_id=user_id,
+    home_city=payload.home_city,
+    home_country=payload.home_country,
+    passions=payload.passions or [],
+)
