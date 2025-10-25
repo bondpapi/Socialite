@@ -29,3 +29,4 @@ def save_profile(user_id: str, payload: ProfileIn) -> dict:
         passions=payload.passions or [],
     )
     return {"ok": True}
+
