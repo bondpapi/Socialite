@@ -97,16 +97,19 @@ TOOLS = [
 # ---- Local tool dispatchers ----
 
 def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    data = search_events_sync(
-        city=args["city"],
-        country=args["country"],
-        days_ahead=int(args.get("days_ahead", 30)),
-        start_in_days=int(args.get("start_in_days", 0)),
-        include_mock=bool(args.get("include_mock", False)),  # consider True while testing
-        query=args.get("query"),
-    )
-    storage.log_event_search(user_id, args, count=data.get("count", 0))
-    return data
+    try:
+        data = search_events_sync(
+            city=args["city"],
+            country=args["country"],
+            days_ahead=int(args.get("days_ahead", 30)),
+            start_in_days=int(args.get("start_in_days", 0)),
+            include_mock=bool(args.get("include_mock", True)),
+            query=args.get("query"),
+        )
+        storage.log_event_search(user_id, args, count=data.get("count", 0))
+        return data
+    except Exception as exc:
+        return {"count": 0, "items": [], "error": f"search failed: {exc!r}"}
 
 
 
