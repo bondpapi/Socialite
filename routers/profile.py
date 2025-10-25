@@ -18,9 +18,9 @@ def get_profile(user_id: str) -> dict:
 @router.post("/{user_id}")
 def save_profile(user_id: str, payload: ProfileIn) -> dict:
     storage.save_preferences(
-        user_id,
-        payload.home_city,
-        payload.home_country,
-        payload.passions or [],
+        user_id=user_id,
+        home_city=payload.home_city,
+        home_country=payload.home_country,
+        passions=payload.passions or [],
     )
     return {"ok": True}
