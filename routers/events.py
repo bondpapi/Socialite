@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.recommend import rank_events
-from services.aggregator import list_providers as agg_list_providers, search_events as agg_search_events
+from services.aggregator import (
+    list_providers as agg_list_providers,
+    search_events as agg_search_events,
+)
 from schemas import EventOut
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -22,23 +25,18 @@ class EventsResponse(BaseModel):
     country: str
     count: int
     items: List[EventOut]
-    errors: List[str] = []
+    errors: List[str] = Field(default_factory=list)  # avoid mutable default
 
 
 # ---------- Routes ----------
 
 @router.get("/_ping")
 def ping() -> dict:
-    """Lightweight healthcheck for this router."""
     return {"ok": True}
 
 
 @router.get("/providers", response_model=ProvidersResponse)
 def providers(include_mock: Optional[bool] = None) -> ProvidersResponse:
-    """
-    List the available data providers discovered by the aggregator.
-    If include_mock is False, mock providers are filtered out.
-    """
     provs = agg_list_providers(include_mock=include_mock)
     return ProvidersResponse(providers=provs)
 
@@ -61,6 +59,8 @@ async def search(
     Provider failures are represented in `errors` instead of causing a 500.
     """
     try:
+        country = country.upper()
+
         aggregated: Dict[str, Any] = await agg_search_events(
             city=city,
             country=country,
@@ -72,7 +72,7 @@ async def search(
 
         raw_items: List[Dict[str, Any]] = aggregated.get("items", []) or []
 
-        # Pull any provider-level errors injected by the aggregator
+        # Collect provider-level errors injected by the aggregator
         nonfatal_errors: List[str] = []
         for e in raw_items:
             if isinstance(e, dict) and e.get("category") == "provider_error" and e.get("error"):
@@ -82,14 +82,24 @@ async def search(
         passions = ["music", "standup", "marathon", "poetry"]
         ranked = rank_events(raw_items, passions)
 
+        # Validate items with Pydantic v2 API; downgrade bad items to errors
+        valid_items: List[EventOut] = []
+        for idx, item in enumerate(ranked):
+            try:
+                # Pydantic v2 replacement for parse_obj
+                valid_items.append(EventOut.model_validate(item))
+            except Exception as ve:
+                nonfatal_errors.append(f"item#{idx} validation failed: {ve}")
+
         return EventsResponse(
             city=city,
             country=country,
-            count=len(ranked),
-            items=[EventOut.parse_obj(e) for e in ranked],
+            count=len(valid_items),
+            items=valid_items,
             errors=nonfatal_errors,
         )
     except HTTPException:
         raise
     except Exception as exc:
+        # Shield the route from unexpected crashes
         raise HTTPException(status_code=500, detail=f"events.search failed: {exc!r}")
