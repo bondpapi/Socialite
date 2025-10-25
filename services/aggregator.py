@@ -61,18 +61,6 @@ def _discover_providers() -> List[ProviderInfo]:
     out.sort(key=lambda p: p.key)
     return out
 
-
-
-def _discover_providers() -> List[ProviderInfo]:
-    out: List[ProviderInfo] = []
-    for dotted in _iter_provider_modules():
-        p = _load_provider(dotted)
-        if p:
-            out.append(p)
-    out.sort(key=lambda p: p.key)
-    return out
-
-
 # ---- Public API --------------------------------------------------------------
 
 def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
