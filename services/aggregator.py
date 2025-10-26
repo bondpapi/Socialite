@@ -7,49 +7,36 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from config import settings  # expects settings.ticketmaster_api_key, settings.eventbrite_token, optional settings.ics_feeds
+from config import settings
 
-# Hard exclude providers by key (without deleting files)
 EXCLUDE_KEYS = {"seatgeek"}
 
 @dataclass(frozen=True)
 class ProviderInfo:
-    key: str                 # e.g., "ticketmaster"
-    name: str                # human readable
-    module: str              # dotted path
-    kind: str                # "function" or "class"
-    callable: Any            # function or provider instance
+    key: str
+    name: str
+    module: str
+    kind: str           # "function" or "class"
+    callable: Any       # function or provider instance
 
-
-# ---------- discovery ---------------------------------------------------------
 
 def _iter_provider_modules() -> Iterable[str]:
-    """
-    Discover modules inside the top-level 'providers' package.
-    """
-    pkg_name = "providers"
     try:
-        pkg = importlib.import_module(pkg_name)
+        pkg = importlib.import_module("providers")
     except Exception:
         return []
-
     for m in pkgutil.iter_modules(getattr(pkg, "__path__", [])):
         if not m.name.startswith("_"):
-            yield f"{pkg_name}.{m.name}"
+            yield f"providers.{m.name}"
 
 
 def _load_provider(module_name: str) -> Optional[ProviderInfo]:
-    """
-    Accept either:
-      - module-level function: search(city, country, days_ahead, start_in_days, query)
-      - class provider with async: search(city, country, start, end, query)
-    """
     try:
         mod = importlib.import_module(module_name)
     except Exception:
         return None
 
-    # A) module-level sync search(...)
+    # module-level function search(...)
     fn = getattr(mod, "search", None)
     if callable(fn):
         key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1]).lower()
@@ -58,14 +45,11 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
             return None
         return ProviderInfo(key=key, name=name, module=module_name, kind="function", callable=fn)
 
-    # B) class-based provider with async search(...)
+    # class-based provider with async search(...)
     for attr_name in dir(mod):
         cls = getattr(mod, attr_name)
-        if not isinstance(cls, type):
+        if not isinstance(cls, type) or not hasattr(cls, "search"):
             continue
-        if not hasattr(cls, "search"):
-            continue
-
         instance = None
         try:
             instance = cls()
@@ -113,16 +97,35 @@ def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
     return [{"key": p.key, "name": p.name, "module": p.module} for p in providers]
 
 
-# ---------- helpers -----------------------------------------------------------
-
 def _to_window(start_in_days: int, days_ahead: int):
     start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
     end = start + timedelta(days=days_ahead)
     return start, end
 
 
-# ---------- public API --------------------------------------------------------
+# ---------- RUN ASYNC CORO FROM SYNC SAFELY ----------
+def _run_coro_sync(coro):
+    """
+    Runs 'coro' to completion whether or not there's a running loop.
+    Avoids 'coroutine was never awaited' and nested-loop errors.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
 
+    if loop and loop.is_running():
+        # Run on a temporary loop (separate from uvicorn/uvloop loop)
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    else:
+        return asyncio.run(coro)
+
+
+# ---------- PUBLIC API ----------
 def search_events_sync(
     *,
     city: str,
@@ -132,10 +135,6 @@ def search_events_sync(
     include_mock: bool = False,
     query: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Fan-out to all providers. Supports both module-level and class-based providers.
-    Returns a debug block for transparency.
-    """
     city = city.strip().title()
     country = country.strip().upper()[:2]
     start, end = _to_window(start_in_days, days_ahead)
@@ -146,12 +145,11 @@ def search_events_sync(
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
 
-    async def _run():
+    async def _fanout():
         tasks = []
         for p in used:
             try:
                 if p.kind == "function":
-                    # old-style module function
                     chunk = p.callable(
                         city=city, country=country,
                         days_ahead=days_ahead, start_in_days=start_in_days,
@@ -161,14 +159,14 @@ def search_events_sync(
                         e.setdefault("source", p.key)
                     results.extend(chunk)
                 else:
-                    # class-based async provider
-                    coro = p.callable.search(
-                        city=city, country=country,
-                        start=start, end=end, query=query
-                    )
-                    tasks.append((p, asyncio.create_task(coro)))
+                    tasks.append((p, asyncio.create_task(
+                        p.callable.search(
+                            city=city, country=country,
+                            start=start, end=end, query=query
+                        )
+                    )))
             except Exception as e:
-                errors.append(f"{p.key}: {e}")
+                +errors.append(f"{p.key}: {e}")  # noqa
 
         for p, t in tasks:
             try:
@@ -180,7 +178,7 @@ def search_events_sync(
             except Exception as e:
                 errors.append(f"{p.key}: {e}")
 
-    asyncio.run(_run())
+    _run_coro_sync(_fanout())
 
     if not used:
         errors.append("No providers available (mocks filtered out or excluded).")
@@ -199,5 +197,4 @@ def search_events_sync(
 
 
 async def search_events(**kw) -> Dict[str, Any]:
-    # Async façade for router
     return search_events_sync(**kw)
