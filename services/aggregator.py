@@ -1,4 +1,3 @@
-# services/aggregator.py
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +9,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from config import settings
 
-# Any provider whose key matches one of these will be ignored.
 EXCLUDE_KEYS = {"seatgeek"}
 
 @dataclass(frozen=True)
@@ -69,7 +67,7 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
         if not hasattr(cls, "search"):
             continue
 
-        # Construct instance; many of your providers accept API tokens
+        # Construct instance;
         instance = None
         try:
             instance = cls()
