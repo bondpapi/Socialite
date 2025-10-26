@@ -1,80 +1,133 @@
-"""
-Provider aggregation for Socialite.
-
-To avoid exporting module-level mutable state that can trigger circular import
-problems during app startup. Instead, we discover providers dynamically and
-expose functions.
-"""
-
+# services/aggregator.py
 from __future__ import annotations
 
+import asyncio
 import importlib
 import pkgutil
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-# ---- Provider discovery ------------------------------------------------------
+from config import settings
+
+# Any provider whose key matches one of these will be ignored.
+EXCLUDE_KEYS = {"seatgeek"}
 
 @dataclass(frozen=True)
 class ProviderInfo:
-    key: str
-    name: str
-    module: str
-    search: Callable[..., List[Dict[str, Any]]]
+    key: str                 # e.g., "ticketmaster"
+    name: str                # human name
+    module: str              # dotted module path
+    kind: str                # "function" or "class"
+    callable: Any            # function object OR provider instance
 
+
+# ---------- discovery ---------------------------------------------------------
 
 def _iter_provider_modules() -> Iterable[str]:
+    """
+    Yields dotted module names inside the 'providers' package.
+    NOTE: Works when providers/ is top-level OR nested alongside services/.
+    """
     pkg_name = "providers"
     try:
         pkg = importlib.import_module(pkg_name)
-    except ModuleNotFoundError:
-        return []
     except Exception:
         return []
 
-    for m in pkgutil.iter_modules(pkg.__path__):  # type: ignore[attr-defined]
+    for m in pkgutil.iter_modules(getattr(pkg, "__path__", [])):
         if not m.name.startswith("_"):
             yield f"{pkg_name}.{m.name}"
 
 
 def _load_provider(module_name: str) -> Optional[ProviderInfo]:
+    """
+    Accept either:
+      - module-level function: search(city, country, days_ahead, start_in_days, query)
+      - class provider with async: search(city, country, start, end, query)
+    """
     try:
         mod = importlib.import_module(module_name)
     except Exception:
         return None
 
-    search = getattr(mod, "search", None)
-    if not callable(search):
-        return None
-    name = getattr(mod, "NAME", module_name.rsplit(".", 1)[-1].title())
-    key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1])
-    return ProviderInfo(key=key, name=name, module=module_name, search=search)
+    # A) module-level sync search(...)
+    fn = getattr(mod, "search", None)
+    if callable(fn):
+        key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1]).lower()
+        name = getattr(mod, "NAME", key.title())
+        if key in EXCLUDE_KEYS:
+            return None
+        return ProviderInfo(key=key, name=name, module=module_name, kind="function", callable=fn)
+
+    # B) class-based provider with async search(...)
+    # Try to find a class with "search" and optional "name"
+    for attr_name in dir(mod):
+        cls = getattr(mod, attr_name)
+        if not isinstance(cls, type):
+            continue
+        if not hasattr(cls, "search"):
+            continue
+
+        # Construct instance; many of your providers accept API tokens
+        instance = None
+        try:
+            instance = cls()
+        except Exception:
+            # Try known constructors via settings (non-fatal if not present)
+            try:
+                if "Ticketmaster" in cls.__name__:
+                    instance = cls(getattr(settings, "ticketmaster_api_key", None))
+                elif "Eventbrite" in cls.__name__:
+                    instance = cls(getattr(settings, "eventbrite_token", None))
+                elif "ICS" in cls.__name__:
+                    feeds = getattr(settings, "ics_feeds", []) or []
+                    instance = cls(feeds)
+                elif "Mock" in cls.__name__:
+                    instance = cls()
+            except Exception:
+                instance = None
+
+        if instance is None:
+            continue
+
+        # Determine key/name
+        key = getattr(mod, "KEY", getattr(instance, "name", attr_name)).lower()
+        name = getattr(mod, "NAME", key.title())
+        if key in EXCLUDE_KEYS or getattr(instance, "name", "").lower() in EXCLUDE_KEYS:
+            return None
+
+        return ProviderInfo(key=key, name=name, module=module_name, kind="class", callable=instance)
+
+    return None
 
 
 def _discover_providers() -> List[ProviderInfo]:
     out: List[ProviderInfo] = []
-    modules = list(_iter_provider_modules()) or []  # tolerate empty
-    for dotted in modules:
+    for dotted in _iter_provider_modules():
         p = _load_provider(dotted)
         if p:
             out.append(p)
     out.sort(key=lambda p: p.key)
     return out
 
-# ---- Public API --------------------------------------------------------------
 
 def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
-    """
-    Returns lightweight provider metadata for UI.
-    If include_mock is False, filters out providers whose key contains 'mock'.
-    """
     providers = _discover_providers()
     if include_mock is False:
         providers = [p for p in providers if "mock" not in p.key.lower()]
     return [{"key": p.key, "name": p.name, "module": p.module} for p in providers]
 
 
-# --- Your original sync search (renamed) -------------------------------------
+# ---------- helpers -----------------------------------------------------------
+
+def _to_window(start_in_days: int, days_ahead: int):
+    start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
+    end = start + timedelta(days=days_ahead)
+    return start, end
+
+
+# ---------- public API --------------------------------------------------------
 
 def search_events_sync(
     *,
@@ -86,70 +139,71 @@ def search_events_sync(
     query: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Fan-out to all discovered providers, aggregate and return a unified payload.
-
-    Each provider's `search` should accept (city, country, days_ahead, start_in_days, query)
-    and return List[dict] items with at least keys:
-        title, start_time (ISO), city, country, source, url, category, venue_name, currency, min_price
+    Fan-out to all providers. Supports both module-level and class-based providers.
+    Returns a debug block for transparency.
     """
-    items: List[Dict[str, Any]] = []
+    city = city.strip().title()
+    country = country.strip().upper()[:2]
+    start, end = _to_window(start_in_days, days_ahead)
+
     providers = _discover_providers()
-    for p in providers:
-        if not include_mock and "mock" in p.key.lower():
-            continue
-        try:
-            chunk = p.search(
-                city=city,
-                country=country,
-                days_ahead=days_ahead,
-                start_in_days=start_in_days,
-                query=query,
-            )
-            if isinstance(chunk, list):
-                for e in chunk:
-                    e.setdefault("source", p.key)
-                items.extend(chunk)
-        except Exception as exc:  # Keep a provider failure from taking down the page
-            items.append(
-                {
-                    "title": f"[{p.key}] provider error",
-                    "category": "provider_error",
-                    "city": city,
-                    "country": country,
-                    "start_time": None,
-                    "url": None,
-                    "venue_name": None,
-                    "currency": None,
-                    "min_price": None,
-                    "error": str(exc),
-                    "source": p.key,
-                }
-            )
+    used = [p for p in providers if include_mock or "mock" not in p.key.lower()]
+
+    results: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    async def _run():
+        tasks = []
+        for p in used:
+            try:
+                if p.kind == "function":
+                    # old-style module function
+                    chunk = p.callable(
+                        city=city, country=country,
+                        days_ahead=days_ahead, start_in_days=start_in_days,
+                        query=query
+                    ) or []
+                    for e in chunk:
+                        e.setdefault("source", p.key)
+                    results.extend(chunk)
+                else:
+                    # class-based async provider
+                    coro = p.callable.search(
+                        city=city, country=country,
+                        start=start, end=end, query=query
+                    )
+                    tasks.append((p, asyncio.create_task(coro)))
+            except Exception as e:
+                errors.append(f"{p.key}: {e}")
+
+        for p, t in tasks:
+            try:
+                chunk = await t
+                if chunk:
+                    for e in chunk:
+                        e.setdefault("source", p.key)
+                    results.extend(list(chunk))
+            except Exception as e:
+                errors.append(f"{p.key}: {e}")
+
+    asyncio.run(_run())
+
+    if not used:
+        errors.append("No providers available (mocks filtered out or excluded).")
+    elif not results:
+        errors.append("Providers returned no events for this query window.")
 
     return {
-        "count": len(items),
-        "items": items,
-        "providers_used": [p.key for p in providers if include_mock or "mock" not in p.key.lower()],
+        "count": len(results),
+        "items": results,
+        "debug": {
+            "discovered": [p.key for p in providers],
+            "providers_used": [p.key for p in used],
+            "errors": errors,
+        },
     }
 
 
-async def search_events(
-    *,
-    city: str,
-    country: str,
-    days_ahead: int = 60,
-    start_in_days: int = 0,
-    include_mock: bool = False,
-    query: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Async façade delegating to the sync implementation so router code can `await` it.
-    """
-    return search_events_sync(
-        city=city,
-        country=country,
-        days_ahead=days_ahead,
-        start_in_days=start_in_days,
-        include_mock=include_mock,
-        query=query,
-    )
+async def search_events(**kw) -> Dict[str, Any]:
+    # Async façade for router
+    return search_events_sync(**kw)

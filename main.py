@@ -1,3 +1,4 @@
+# main.py
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -12,19 +13,10 @@ from routers import (
     auth as auth_router,
     profile as profile_router,
 )
-from scheduler import start_background_scheduler
 
-app = FastAPI(title="Socialite API")
+app = FastAPI(title="socialite-api", version="1.0.0")
 
-# Register routers (each included once)
-app.include_router(events_router.router)
-app.include_router(saved_router.router)
-app.include_router(metrics_router.router)
-app.include_router(agent_router.router)
-app.include_router(auth_router.router)
-app.include_router(profile_router.router)
-
-# CORS + metrics
+# CORS (adjust origins as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,16 +24,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Metrics
 app.add_middleware(MetricsMiddleware)
 
+# Routers
+app.include_router(events_router.router)
+app.include_router(saved_router.router)
+app.include_router(metrics_router.router)
+app.include_router(agent_router.router)
+app.include_router(auth_router.router)
+app.include_router(profile_router.router)
 
-@app.on_event("startup")
-def _startup():
-    try:
-        start_background_scheduler()
-    except Exception:
-        pass
-
+# Health (Render warmup hits this)
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 @app.get("/")
 def root():
