@@ -7,25 +7,25 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from config import settings
+from config import settings  # expects settings.ticketmaster_api_key, settings.eventbrite_token, optional settings.ics_feeds
 
+# Hard exclude providers by key (without deleting files)
 EXCLUDE_KEYS = {"seatgeek"}
 
 @dataclass(frozen=True)
 class ProviderInfo:
     key: str                 # e.g., "ticketmaster"
-    name: str                # human name
-    module: str              # dotted module path
+    name: str                # human readable
+    module: str              # dotted path
     kind: str                # "function" or "class"
-    callable: Any            # function object OR provider instance
+    callable: Any            # function or provider instance
 
 
 # ---------- discovery ---------------------------------------------------------
 
 def _iter_provider_modules() -> Iterable[str]:
     """
-    Yields dotted module names inside the 'providers' package.
-    NOTE: Works when providers/ is top-level OR nested alongside services/.
+    Discover modules inside the top-level 'providers' package.
     """
     pkg_name = "providers"
     try:
@@ -59,7 +59,6 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
         return ProviderInfo(key=key, name=name, module=module_name, kind="function", callable=fn)
 
     # B) class-based provider with async search(...)
-    # Try to find a class with "search" and optional "name"
     for attr_name in dir(mod):
         cls = getattr(mod, attr_name)
         if not isinstance(cls, type):
@@ -67,12 +66,11 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
         if not hasattr(cls, "search"):
             continue
 
-        # Construct instance;
+        # Try to construct. Known constructors mapped to your config.
         instance = None
         try:
             instance = cls()
         except Exception:
-            # Try known constructors via settings (non-fatal if not present)
             try:
                 if "Ticketmaster" in cls.__name__:
                     instance = cls(getattr(settings, "ticketmaster_api_key", None))
@@ -89,7 +87,6 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
         if instance is None:
             continue
 
-        # Determine key/name
         key = getattr(mod, "KEY", getattr(instance, "name", attr_name)).lower()
         name = getattr(mod, "NAME", key.title())
         if key in EXCLUDE_KEYS or getattr(instance, "name", "").lower() in EXCLUDE_KEYS:

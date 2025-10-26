@@ -1,4 +1,3 @@
-# routers/agent.py
 from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
@@ -7,16 +6,15 @@ from typing import Optional, Dict, Any, List
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Try to import your agent and digest services, but stay resilient if missing
 _agent_impl = None
 _digest_impl = None
 try:
-    from services import agent as _agent_impl  # your real agent service (if you have one)
+    from services import agent as _agent_impl
 except Exception:
     pass
 
 try:
-    from services import scheduler as _digest_impl  # digest/scheduler service if present
+    from services import scheduler as _digest_impl
 except Exception:
     pass
 
