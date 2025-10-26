@@ -1,22 +1,25 @@
+# routers/metrics.py
 from __future__ import annotations
 
 from fastapi import APIRouter
-
-from services.metrics import summary_http, timeline_http, summary_llm
+from typing import Dict, Any
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-
-@router.get("/http/summary")
-def http_summary():
-    return summary_http()
-
-
-@router.get("/http/timeline")
-def http_timeline(last_n: int = 300):
-    return {"items": timeline_http(last_n=last_n)}
+# If you have a middleware or service exposing counters, you can import it here.
+_metrics_impl = None
+try:
+    from services import metrics as _metrics_impl  # optional
+except Exception:
+    pass
 
 
-@router.get("/llm/summary")
-def llm_summary():
-    return summary_llm()
+@router.get("")
+def get_metrics() -> Dict[str, Any]:
+    if _metrics_impl and hasattr(_metrics_impl, "snapshot"):
+        try:
+            return {"ok": True, "metrics": _metrics_impl.snapshot()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    # Safe default so /metrics never 500s
+    return {"ok": True, "metrics": {"status": "up"}}
