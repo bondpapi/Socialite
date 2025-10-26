@@ -1,60 +1,94 @@
+# providers/icsfeed.py
 from __future__ import annotations
-import httpx
-from datetime import datetime, timezone, date
-from icalendar import Calendar
-from base import EventRecord
 
-class ICSFeedProvider:
-    name = "ics"
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-    def __init__(self, urls: list[str]):
-        self.urls = urls
+from providers.base import build_event, to_iso_z
+from services import http
 
-    def _as_dt(self, v):
-        if isinstance(v, datetime):
-            return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
-        if isinstance(v, date):
-            return datetime(v.year, v.month, v.day, tzinfo=timezone.utc)
-        return None
+KEY = "ics"
+NAME = "ICS Feeds"
 
-    async def search(self, *, city: str, country: str, start=None, end=None, query=None):
-        results = []
-        async with httpx.AsyncClient(timeout=25) as client:
-            for url in self.urls:
-                try:
-                    r = await client.get(url)
-                    r.raise_for_status()
-                    cal = Calendar.from_ical(r.text)
-                except Exception as e:
-                    print(f"[ICS] fetch error {url}: {e}")
-                    continue
+class ICSProvider:
+    name = KEY
 
-                for comp in cal.walk("vevent"):
-                    summary = str(comp.get("summary") or "Event")
-                    dtstart = comp.get("dtstart")
-                    dt = self._as_dt(dtstart.dt) if dtstart else None
-                    if start and dt and dt < start:
-                        continue
-                    if end and dt and dt > end:
-                        continue
-                    loc = comp.get("location")
-                    url_field = comp.get("url")
-                    if query:
-                        q = query.lower()
-                        if q not in summary.lower() and (not loc or q not in str(loc).lower()):
-                            continue
+    def __init__(self, urls: List[str] | None) -> None:
+        self.urls = urls or []
 
-                    results.append(EventRecord(
-                        source=self.name,
-                        external_id=str(comp.get("uid") or f"{url}:{summary}:{dt}"),
-                        title=summary,
-                        category="unknown",
-                        start_time=dt,
-                        city=city,           # best-effort
-                        country=country,
-                        venue_name=str(loc) if loc else None,
-                        min_price=None,
-                        currency="EUR",
-                        url=str(url_field) if url_field else None,
-                    ))
-        return results
+    @staticmethod
+    def _parse_ics(text: str) -> List[Dict[str, Any]]:
+        # Minimal iCalendar parser (BEGIN:VEVENT … END:VEVENT)
+        out: List[Dict[str, Any]] = []
+        lines = [ln.strip() for ln in text.splitlines()]
+        i = 0
+        while i < len(lines):
+            if lines[i] == "BEGIN:VEVENT":
+                props: Dict[str, str] = {}
+                i += 1
+                while i < len(lines) and lines[i] != "END:VEVENT":
+                    ln = lines[i]
+                    if ":" in ln:
+                        k, v = ln.split(":", 1)
+                        props[k.upper()] = v.strip()
+                    i += 1
+                # Build
+                title = props.get("SUMMARY") or None
+                url = props.get("URL") or None
+                venue = props.get("LOCATION") or None
+                # DTSTART can be in multiple forms; handle UTC basic forms
+                dt_iso = None
+                raw = props.get("DTSTART") or props.get("DTSTART;VALUE=DATE-TIME") or None
+                if raw:
+                    # Support YYYYMMDDTHHMMSSZ or YYYYMMDD
+                    try:
+                        if raw.endswith("Z"):
+                            # 20250131T190000Z
+                            dt = datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+                            dt_iso = to_iso_z(dt)
+                        elif "T" in raw:
+                            dt = datetime.strptime(raw, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                            dt_iso = to_iso_z(dt)
+                        else:
+                            # All-day date
+                            dt = datetime.strptime(raw, "%Y%m%d").replace(tzinfo=timezone.utc)
+                            dt_iso = to_iso_z(dt)
+                    except Exception:
+                        dt_iso = None
+
+                out.append(build_event(
+                    title=title,
+                    start_time=dt_iso,
+                    city=None,
+                    country=None,
+                    url=url,
+                    venue_name=venue,
+                    category=None,
+                    currency=None,
+                    min_price=None,
+                ))
+            i += 1
+        return out
+
+    async def search(
+        self,
+        *,
+        city: str,
+        country: str,
+        start: datetime,
+        end: datetime,
+        query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for url in self.urls:
+            r = http.get(url, timeout=12)
+            if r.status_code == 200 and "BEGIN:VCALENDAR" in r.text:
+                parsed = self._parse_ics(r.text)
+                # Optional: filter by keyword or date window
+                for e in parsed:
+                    ok = True
+                    if query and e.get("title"):
+                        ok = query.lower() in e["title"].lower()
+                    if ok:
+                        items.append(e)
+        return items

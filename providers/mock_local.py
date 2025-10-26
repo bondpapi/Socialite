@@ -1,58 +1,44 @@
-from base import Provider, EventRecord
-from datetime import datetime, timedelta
+# providers/mock_local.py
+from __future__ import annotations
 
-class MockLocalProvider:
-    name = "mock"
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-    async def search(self, *, city: str, country: str, start=None, end=None, query=None):
-        now = datetime.utcnow()
-        venue1 = f"{city} Arts Hub"
-        venue2 = f"{city} Community Stage"
-        venue3 = f"{city} Arena"
+from providers.base import build_event, to_iso_z
 
-        data = [
-            EventRecord(
-                source=self.name,
-                external_id="m1",
-                title=f"Indie Night @ {venue1}",
-                category="music",
-                start_time=now + timedelta(days=2),
-                city=city,
-                country=country,
-                venue_name=venue1,
-                min_price=15.0,
-                currency="EUR",
-                url="https://example.com/indie"
-            ),
-            EventRecord(
-                source=self.name,
-                external_id="m2",
-                title="Open Mic Poetry",
-                category="spoken_word",
-                start_time=now + timedelta(days=3),
-                city=city,
-                country=country,
-                venue_name=venue2,
-                min_price=0.0,
-                currency="EUR",
-                url="https://example.com/poetry"
-            ),
-            EventRecord(
-                source=self.name,
-                external_id="m3",
-                title=f"Home Game: {city} City FC",
-                category="sports",
-                start_time=now + timedelta(days=6),
-                city=city,
-                country=country,
-                venue_name=venue3,
-                min_price=25.0,
-                currency="EUR",
-                url="https://example.com/fc"
-            ),
-        ]
+KEY = "mock_local"
+NAME = "Mock (Local)"
 
-        if query:
-            q = query.lower()
-            data = [d for d in data if q in d["title"].lower() or q in d["category"].lower()]
-        return data
+def search(
+    *,
+    city: str,
+    country: str,
+    days_ahead: int = 60,
+    start_in_days: int = 0,
+    query: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Module-level sync search (compatible with aggregator.function-style).
+    Always returns a couple of predictable mock events.
+    """
+    start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
+    e1 = build_event(
+        title=f"{city} Street Food Festival",
+        start_time=to_iso_z(start + timedelta(days=3, hours=18)),
+        city=city, country=country,
+        url=None, venue_name=f"{city} Old Town",
+        category="food",
+        currency="EUR", min_price=0.0,
+    )
+    e2 = build_event(
+        title=f"{city} Live Jazz Night",
+        start_time=to_iso_z(start + timedelta(days=7, hours=20)),
+        city=city, country=country,
+        url=None, venue_name=f"{city} Jazz Club",
+        category="music",
+        currency="EUR", min_price=10.0,
+    )
+    if query:
+        q = query.lower()
+        return [e for e in [e1, e2] if q in (e["title"] or "").lower()]
+    return [e1, e2]

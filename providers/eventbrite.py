@@ -1,86 +1,130 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-import logging
-from datetime import datetime, timedelta, timezone
-import requests
-from utils.http_client import HttpClient
 
-logger = logging.getLogger(__name__)
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-BASE_URL = "https://www.eventbriteapi.com/v3"
+from config import settings
+from services import http
+from providers.base import build_event, to_iso_z
 
+KEY = "eventbrite"
+NAME = "Eventbrite"
 
-def _iso(dt: datetime) -> str:
-    # Eventbrite expects UTC ISO with 'Z'
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+EB_URL = "https://www.eventbriteapi.com/v3/events/search/"
 
-def search(
-    *,
-    client: HttpClient,
-    token: Optional[str],
-    city: str,
-    country: str,
-    start_in_days: int,
-    days_ahead: int,
-    keyword: Optional[str] = None,
-    radius_km: int = 75,
-) -> List[Dict[str, Any]]:
-    """
-    Returns a normalized list of events from Eventbrite.
-    Gracefully handles 404 and non-OK by returning [] and logging.
-    """
-    if not token:
-        logger.debug("Eventbrite token not configured; skipping.")
-        return []
+def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
+    # Eventbrite expects ISO Z strings
+    return to_iso_z(start), to_iso_z(end)
 
-    start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
-    end = start + timedelta(days=days_ahead)
+def _parse_venue(venue: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    name = venue.get("name") or None
+    address = venue.get("address") or {}
+    city = address.get("city") or None
+    country = address.get("country") or None
+    return {"venue_name": name, "city": city, "country": country}
 
-    params: Dict[str, Any] = {
-        "sort_by": "date",
-        "location.address": city,
-        "location.within": f"{radius_km}km",
-        "start_date.range_start": _iso(start),
-        "start_date.range_end": _iso(end),
-        "expand": "venue",
-        "page_size": 50,
-    }
-    if keyword:
-        params["q"] = keyword
+def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    title = e.get("name", {}).get("text") or e.get("name") or None
+    url = e.get("url")
+    category = None
+    if e.get("category_id"):
+        category = e.get("category_id")
 
-    headers = {"Authorization": f"Bearer {token}"}
-
+    start_iso = None
     try:
-        data = client.get_json(f"{BASE_URL}/events/search/", params=params, headers=headers, default={})
-    except requests.HTTPError as e:
-        logger.warning("Eventbrite search failed: %s", e)
-        return []
-    except Exception as e:
-        logger.warning("Eventbrite unexpected error: %s", e)
-        return []
+        start_iso = e.get("start", {}).get("utc") or None
+        if start_iso and not start_iso.endswith("Z"):
+            # Ensure Z suffix
+            start_iso = start_iso.replace("+00:00", "Z")
+    except Exception:
+        pass
 
-    # Normalize
-    items: List[Dict[str, Any]] = []
-    events = (data or {}).get("events", []) if isinstance(data, dict) else []
-    for ev in events:
-        name = ((ev.get("name") or {}).get("text")) or "Untitled"
-        start_time = ((ev.get("start") or {}).get("utc")) or None
-        url = ev.get("url")
-        venue = (ev.get("venue") or {}).get("name")
+    venue_name, city, country = None, None, None
+    venue_id = e.get("venue_id")
+    if venue_id and venue_id in venue_map:
+        v = venue_map[venue_id]
+        parsed = _parse_venue(v)
+        venue_name = parsed["venue_name"]
+        city = parsed["city"]
+        country = parsed["country"]
 
-        items.append(
-            {
-                "source": "eventbrite",
-                "external_id": ev.get("id"),
-                "title": name,
-                "category": "Event",
-                "start_time": start_time,
-                "city": city,
-                "country": country,
-                "venue_name": venue,
-                "min_price": None,
-                "currency": None,
-                "url": url,
-            }
-        )
-    return items
+    # Eventbrite only exposes paid/ticket info via ticket classes in other endpoints;
+    # keep currency/min_price None here.
+    return build_event(
+        title=title,
+        start_time=start_iso,
+        city=city,
+        country=country,
+        url=url,
+        venue_name=venue_name,
+        category=category,
+        currency=None,
+        min_price=None,
+    )
+
+class EventbriteProvider:
+    name = KEY
+
+    def __init__(self, token: Optional[str]) -> None:
+        self.token = token
+
+    async def search(
+        self,
+        *,
+        city: str,
+        country: str,
+        start: datetime,
+        end: datetime,
+        query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if not self.token:
+            raise RuntimeError("EVENTBRITE_TOKEN not configured")
+
+        start_iso, end_iso = _iso_window(start, end)
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        # Phase 1: city-level search
+        params: Dict[str, Any] = {
+            "location.address": city,
+            "location.within": "100km",
+            "start_date.range_start": start_iso,
+            "start_date.range_end": end_iso,
+            "expand": "venue",
+            "include_adult_events": "false",
+            "sort_by": "date",
+            "page_size": 200,
+        }
+        if query:
+            params["q"] = query
+
+        resp = http.get(EB_URL, params=params, headers=headers, timeout=12)
+        items: List[Dict[str, Any]] = []
+        venue_map: Dict[str, Dict[str, Any]] = {}
+
+        def collect(resp_json: Dict[str, Any]) -> None:
+            nonlocal items, venue_map
+            events = resp_json.get("events") or []
+            # Build a venue map if expanded
+            for ev in events:
+                ven = ev.get("venue")
+                if isinstance(ven, dict) and ven.get("id"):
+                    venue_map[ven["id"]] = ven
+            for ev in events:
+                items.append(_parse_event(ev, venue_map))
+
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            collect(data)
+
+        # If no hits, broaden slightly by dropping city (Eventbrite doesn't filter by country code directly).
+        if not items:
+            params.pop("location.address", None)
+            params["location.within"] = "400km"
+            # Heuristic: try a known large city in the same country to pull results users can still browse.
+            # We leave city blank; users can still filter client-side.
+            resp2 = http.get(EB_URL, params=params, headers=headers, timeout=12)
+            if resp2.status_code == 200:
+                data2 = resp2.json() or {}
+                collect(data2)
+
+        return items
