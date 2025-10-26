@@ -1,10 +1,9 @@
-# providers/web.py
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from utils.http_client import HttpClient
 from config import settings
-from providers import web_discovery 
+from providers import web_discovery
 
 KEY = "web"
 NAME = "Web Discovery"
@@ -23,12 +22,12 @@ def search(
         client=client,
         city=city,
         country=country,
-        allow_domains=None,    # or pass a list to constrain
+        allow_domains=None, 
         keyword=query,
         limit_per_site=25,
     )
 
-    # Ensure aggregator schema
+    # Conform to aggregator schema and fill blanks
     out: List[Dict[str, Any]] = []
     for it in items:
         it.setdefault("source", KEY)
