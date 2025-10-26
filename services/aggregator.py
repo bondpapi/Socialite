@@ -66,7 +66,6 @@ def _load_provider(module_name: str) -> Optional[ProviderInfo]:
         if not hasattr(cls, "search"):
             continue
 
-        # Try to construct. Known constructors mapped to your config.
         instance = None
         try:
             instance = cls()

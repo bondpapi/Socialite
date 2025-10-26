@@ -1,3 +1,4 @@
+# services/storage.py
 from __future__ import annotations
 
 import json
@@ -7,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DB_PATH = Path(__file__).resolve().parent.parent / "social_agent.db"
 
-
 # ---------- DB helpers ----------
 
 def _connect() -> sqlite3.Connection:
@@ -15,219 +15,175 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
+def _init_schema(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
 
-def _init():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS profiles (
+        user_id TEXT PRIMARY KEY,
+        username TEXT,
+        city TEXT,
+        country TEXT,
+        passions TEXT,       -- JSON list
+        birthday TEXT        -- ISO YYYY-MM-DD
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS saved (
+        user_id TEXT,
+        event_id TEXT,
+        payload  TEXT,       -- JSON event
+        PRIMARY KEY (user_id, event_id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS ratings (
+        user_id TEXT,
+        event_id TEXT,
+        rating INTEGER,
+        PRIMARY KEY (user_id, event_id)
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS search_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+        user_id TEXT,
+        args    TEXT,     -- JSON of query args
+        count   INTEGER
+    )
+    """)
+
+    # digest outbox (server → client)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS digests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        payload TEXT      -- JSON list of cards
+    )
+    """)
+
+    conn.commit()
+
+# Ensure DB exists
+with _connect() as _c:
+    _init_schema(_c)
+
+
+# ---------- Profiles ----------
+
+def get_profile(user_id: str) -> Dict[str, Any] | None:
     with _connect() as conn:
-        cur = conn.cursor()
+        row = conn.execute("SELECT * FROM profiles WHERE user_id = ?", (user_id,)).fetchone()
+        if not row:
+            return None
+        passions = json.loads(row["passions"]) if row["passions"] else []
+        return {
+            "user_id": row["user_id"],
+            "username": row["username"],
+            "city": row["city"],
+            "country": row["country"],
+            "passions": passions,
+            "birthday": row["birthday"],
+        }
 
-        # user preferences (one row per user)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS user_prefs (
-            user_id TEXT PRIMARY KEY,
-            home_city TEXT,
-            home_country TEXT,
-            passions TEXT      -- JSON array of strings
-        )
-        """)
-
-        # subscriptions (weekly/daily)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            user_id TEXT PRIMARY KEY,
-            frequency TEXT CHECK(frequency in ('daily','weekly')) NOT NULL DEFAULT 'weekly'
-        )
-        """)
-
-        # saved events (users can save multiple)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS saved_events (
-            user_id TEXT NOT NULL,
-            event_key TEXT NOT NULL,
-            payload   TEXT,     -- JSON blob of the event
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, event_key)
-        )
-        """)
-
-        # lightweight search log for metrics
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS search_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-            user_id TEXT,
-            args    TEXT,     -- JSON of query args
-            count   INTEGER
-        )
-        """)
-
-        # -------- NEW: digest outbox (for scheduler -> streamlit) ----------
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS digests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            payload TEXT NOT NULL,  -- JSON array of event items
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_digests_userid ON digests(user_id)")
-
-        conn.commit()
-
-
-_init()
-
-
-# ---------- Preferences ----------
-
-def save_preferences(
-    *,
-    user_id: str,
-    home_city: Optional[str] = None,
-    home_country: Optional[str] = None,
-    passions: Optional[List[str]] = None,
-) -> None:
-    """Upsert preferences for a user."""
-    passions_json = json.dumps(passions or [])
-    with _connect() as conn:
-        conn.execute("""
-            INSERT INTO user_prefs (user_id, home_city, home_country, passions)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                home_city=excluded.home_city,
-                home_country=excluded.home_country,
-                passions=excluded.passions
-        """, (user_id, home_city, home_country, passions_json))
-        conn.commit()
-
-
-def get_preferences(user_id: str) -> Dict[str, Any]:
-    """Return preferences dict; empty dict if none."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT home_city, home_country, passions FROM user_prefs WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()
-
-    if not row:
-        return {}
-
-    passions = []
-    if row["passions"]:
-        try:
-            passions = json.loads(row["passions"])
-        except Exception:
-            passions = []
-
-    return {
-        "home_city": row["home_city"],
-        "home_country": row["home_country"],
-        "passions": passions,
-    }
-
-
-# ---------- Subscriptions ----------
-
-def upsert_subscription(user_id: str, *, frequency: str = "weekly") -> None:
+def upsert_profile(p: Dict[str, Any]) -> Dict[str, Any]:
+    passions = json.dumps(p.get("passions") or [])
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO subscriptions (user_id, frequency)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET frequency=excluded.frequency
-        """, (user_id, frequency))
+        INSERT INTO profiles (user_id, username, city, country, passions, birthday)
+        VALUES (:user_id, :username, :city, :country, :passions, :birthday)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            city=excluded.city,
+            country=excluded.country,
+            passions=excluded.passions,
+            birthday=excluded.birthday
+        """, {
+            "user_id": p["user_id"],
+            "username": p.get("username"),
+            "city": p.get("city"),
+            "country": p.get("country"),
+            "passions": passions,
+            "birthday": p.get("birthday"),
+        })
         conn.commit()
-
-
-def get_subscription(user_id: str) -> Optional[str]:
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT frequency FROM subscriptions WHERE user_id = ?",
-            (user_id,)
-        ).fetchone()
-    return row["frequency"] if row else None
+    return get_profile(p["user_id"]) or p
 
 
 # ---------- Saved events ----------
 
-def list_saved(user_id: str) -> List[Dict[str, Any]]:
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT event_key, payload, ts FROM saved_events WHERE user_id = ? ORDER BY ts DESC",
-            (user_id,)
-        ).fetchall()
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        payload = {}
-        if r["payload"]:
-            try:
-                payload = json.loads(r["payload"])
-            except Exception:
-                payload = {}
-        out.append({"event_key": r["event_key"], "payload": payload, "ts": r["ts"]})
-    return out
-
-
-def add_saved(user_id: str, event_key: str, event_payload: Dict[str, Any]) -> None:
+def save_event(user_id: str, event: Dict[str, Any]) -> None:
+    event_id = event.get("id") or event.get("url") or json.dumps(event)[:64]
     with _connect() as conn:
         conn.execute("""
-            INSERT INTO saved_events (user_id, event_key, payload)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id, event_key) DO UPDATE SET payload=excluded.payload
-        """, (user_id, event_key, json.dumps(event_payload)))
+        INSERT OR REPLACE INTO saved (user_id, event_id, payload)
+        VALUES (?, ?, ?)
+        """, (user_id, event_id, json.dumps(event)))
+        conn.commit()
+
+def list_saved(user_id: str) -> List[Dict[str, Any]]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT payload FROM saved WHERE user_id = ?", (user_id,)).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["payload"]))
+            except Exception:
+                pass
+        return out
+
+def clear_saved(user_id: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM saved WHERE user_id = ?", (user_id,))
         conn.commit()
 
 
-def delete_saved(user_id: str, event_key: str) -> None:
+# ---------- Ratings ----------
+
+def set_rating(user_id: str, event_id: str, rating: int) -> None:
+    rating = max(1, min(5, int(rating)))
     with _connect() as conn:
-        conn.execute(
-            "DELETE FROM saved_events WHERE user_id = ? AND event_key = ?",
-            (user_id, event_key)
-        )
+        conn.execute("""
+        INSERT OR REPLACE INTO ratings (user_id, event_id, rating)
+        VALUES (?, ?, ?)
+        """, (user_id, event_id, rating))
         conn.commit()
 
 
-# ---------- Metrics / logging ----------
+# ---------- Search log ----------
 
-def log_event_search(user_id: str, args: Dict[str, Any], count: int) -> None:
+def log_search(user_id: Optional[str], args: Dict[str, Any], count: int) -> None:
     with _connect() as conn:
-        conn.execute(
-            "INSERT INTO search_log (user_id, args, count) VALUES (?, ?, ?)",
-            (user_id, json.dumps(args), int(count))
-        )
+        conn.execute("""
+        INSERT INTO search_log (user_id, args, count)
+        VALUES (?, ?, ?)
+        """, (user_id, json.dumps(args), int(count)))
         conn.commit()
 
 
-# ---------- NEW: Digest outbox (used by routers/agent.py) ----------
+# ---------- Digest outbox ----------
 
-def save_digest(user_id: str, *, items: List[Dict[str, Any]]) -> None:
-    """
-    Append a digest for a user. Your scheduler can call this to enqueue picks.
-    Streamlit will later fetch them via /agent/digest/{user_id}.
-    """
-    payload = json.dumps(items or [])
+def enqueue_digest(user_id: str, cards: List[Dict[str, Any]]) -> None:
     with _connect() as conn:
-        conn.execute(
-            "INSERT INTO digests (user_id, payload) VALUES (?, ?)",
-            (user_id, payload),
-        )
+        conn.execute("""
+        INSERT INTO digests (user_id, payload) VALUES (?, ?)
+        """, (user_id, json.dumps(cards)))
         conn.commit()
 
-
-def pop_digest(user_id: str) -> List[Dict[str, Any]]:
-    """
-    Atomically return one pending digest for the user and delete it.
-    If none pending, returns [].
-    """
+def pop_latest_digest(user_id: str) -> List[Dict[str, Any]]:
     with _connect() as conn:
-        # Make the select+delete atomic
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT id, payload FROM digests WHERE user_id = ? ORDER BY id ASC LIMIT 1",
-            (user_id,),
-        ).fetchone()
+        row = conn.execute("""
+        SELECT id, payload FROM digests
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """, (user_id,)).fetchone()
 
         if not row:
-            conn.commit()
             return []
 
         digest_id = row["id"]
