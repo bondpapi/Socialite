@@ -151,7 +151,8 @@ with tab_discover:
         st.caption("Uses Settings → city/country/keywords/date window.")
         include_mock_feed = st.toggle("Include mock in feed", value=False)
         if st.button("Refresh now"):
-            st.experimental_rerun()
+            st.rerun()
+
 
     with right:
         st.subheader("Recommended for you")
