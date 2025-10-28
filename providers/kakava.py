@@ -9,8 +9,9 @@ from urllib.parse import urljoin, urlencode, urlparse, parse_qsl, urlunparse
 
 from bs4 import BeautifulSoup
 
-from services import http
-from providers.base import build_event
+
+from ..services import http
+from .base import build_event
 
 KEY = "kakava"
 NAME = "Kakava"
