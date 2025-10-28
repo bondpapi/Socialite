@@ -5,6 +5,9 @@ from typing import Optional, Mapping, Any
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
+# services/http.py
+DEFAULT_HEADERS = {"User-Agent": "Socialite/0.1 (+https://example.com)"}
+
 
 def _make_session(
     total: int = 3,
