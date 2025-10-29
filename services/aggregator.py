@@ -21,10 +21,20 @@ class ProviderInfo:
     module: str
     search: Callable[..., Any]  # may be sync or async
 
+# --- discovery & loader (replace your current versions) ---
+
+_DISCOVERY: Dict[str, Any] = {
+    "searched_pkg": "providers",
+    "discovered_modules": [],
+    "loaded": [],
+    "skipped": [],
+    "errors": {},      # mod -> "ImportError ..." / traceback
+}
+
 def _iter_provider_modules() -> Iterable[str]:
     """
-    Discover top-level package 'providers' (sibling of 'services').
-    Falls back to a filesystem scan under ./providers if import fails.
+    Discover top-level 'providers' package; fall back to filesystem scan.
+    Works with layout where repo root contains providers/, services/, routers/.
     """
     pkg_name = "providers"
 
@@ -33,49 +43,61 @@ def _iter_provider_modules() -> Iterable[str]:
         pkg = importlib.import_module(pkg_name)
         for m in pkgutil.iter_modules(pkg.__path__, pkg_name + "."):  # type: ignore[attr-defined]
             leaf = m.name.rsplit(".", 1)[-1]
-            if not leaf.startswith("_"):
-                yield m.name
+            if leaf.startswith("_"):
+                continue
+            _DISCOVERY["discovered_modules"].append(m.name)
+            yield m.name
         return
-    except ModuleNotFoundError as e:
-        # continue to filesystem fallback
-        pass
-    except Exception:
-        # continue to filesystem fallback
-        pass
+    except Exception as e:
+        _DISCOVERY["errors"]["__package__"] = f"{type(e).__name__}: {e}"
 
-    # Filesystem fallback (works if PYTHONPATH is odd)
+    # Filesystem fallback
     root = Path(__file__).resolve().parent.parent / "providers"
     if root.exists():
-        project_root = root.parent  # repo root that has providers/, services/
+        project_root = root.parent  # repo root
         if str(project_root) not in sys.path:
             sys.path.append(str(project_root))
         for py in root.glob("*.py"):
-            if not py.name.startswith("_"):
-                yield f"{pkg_name}.{py.stem}"
+            if py.name.startswith("_"):
+                continue
+            mod = f"providers.{py.stem}"
+            _DISCOVERY["discovered_modules"].append(mod)
+            yield mod
 
+@dataclass
+class Provider:
+    key: str
+    is_async: bool
+    fn: Any
+    module: str
 
-def _load_provider(module_name: str) -> Optional[ProviderInfo]:
-    try:
-        mod = importlib.import_module(module_name)
-    except Exception:
-        return None
+_PROVIDERS: List[Provider] = []
 
-    search = getattr(mod, "search", None)
-    if not callable(search):
-        return None
-    name = getattr(mod, "NAME", module_name.rsplit(".", 1)[-1].title())
-    key = getattr(mod, "KEY", module_name.rsplit(".", 1)[-1])
-    return ProviderInfo(key=key, name=name, module=module_name, search=search)
+def _load_providers() -> None:
+    _PROVIDERS.clear()
+    for mod_name in _iter_provider_modules():
+        key = mod_name.split(".")[-1]
+        try:
+            mod = importlib.import_module(mod_name)
+            fn = getattr(mod, "search", None)
+            if not callable(fn):
+                _DISCOVERY["skipped"].append({"module": mod_name, "reason": "no_search_function"})
+                continue
+            is_async = asyncio.iscoroutinefunction(fn)
+            _PROVIDERS.append(Provider(key=key, is_async=is_async, fn=fn, module=mod_name))
+            _DISCOVERY["loaded"].append({"key": key, "module": mod_name})
+        except Exception as e:
+            _DISCOVERY["errors"][mod_name] = f"{type(e).__name__}: {e}"
 
+# Call once at import
+_load_providers()
 
-def _discover_providers() -> List[ProviderInfo]:
-    out: List[ProviderInfo] = []
-    for dotted in _iter_provider_modules():
-        p = _load_provider(dotted)
-        if p:
-            out.append(p)
-    out.sort(key=lambda p: p.key)
-    return out
+def list_provider_diagnostics() -> Dict[str, Any]:
+    """Return rich discovery info for debugging on Render."""
+    return {
+        "providers": [{"key": p.key, "module": p.module} for p in _PROVIDERS],
+        "discovery": _DISCOVERY,
+    }
 
 
 # ---------- Public helpers for UI ----------

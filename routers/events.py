@@ -7,16 +7,21 @@ from pydantic import BaseModel, Field, ValidationError
 
 from services.recommend import rank_events
 from services.aggregator import (
-    list_providers as agg_list_providers,
-    search_events as agg_search_events,  # <-- async
+    list_providers as agg_list_providers,          # unchanged (legacy simple list)
+    list_provider_diagnostics as agg_diag,         # NEW: rich diagnostics (add this in aggregator if missing)
+    search_events as agg_search_events,            # <-- async
 )
 from schemas import EventOut
 
 router = APIRouter(prefix="/events", tags=["events"])
 
 
+# ---------- Responses ----------
 class ProvidersResponse(BaseModel):
-    providers: List[Dict[str, str]]
+    # keep your original list for backward-compat
+    providers: List[Dict[str, str]] = Field(default_factory=list)
+    # add diagnostics so you can see discovered modules & errors on Render
+    discovery: Optional[Dict[str, Any]] = None
 
 
 class EventsResponse(BaseModel):
@@ -28,22 +33,34 @@ class EventsResponse(BaseModel):
     debug: Optional[Dict[str, Any]] = None
 
 
+# ---------- Routes ----------
 @router.get("/providers", response_model=ProvidersResponse)
 def get_providers(include_mock: Optional[bool] = None) -> ProvidersResponse:
-    return ProvidersResponse(providers=agg_list_providers(include_mock=include_mock))
+    """
+    Return both the legacy simple list and the rich diagnostics.
+    The diagnostics include: discovered_modules, loaded, skipped, and import errors.
+    """
+    # fall back if agg_diag isn't available in your current aggregator
+    try:
+        diag = agg_diag()
+        simple = diag.get("providers") or agg_list_providers(include_mock=include_mock)
+        return ProvidersResponse(providers=simple, discovery=diag.get("discovery"))
+    except Exception:
+        return ProvidersResponse(providers=agg_list_providers(include_mock=include_mock))
 
 
 @router.get("/search", response_model=EventsResponse)
 async def search(
     *,
     city: str = Query(..., min_length=1, description="City name (non-empty)"),
-    country: str = Query(
-        ..., min_length=2, max_length=2, description="Country ISO-2, e.g. LT"
-    ),
+    country: str = Query(..., min_length=2, max_length=2, description="Country ISO-2, e.g. LT"),
     days_ahead: int = Query(60, ge=1, le=3650),
     start_in_days: int = Query(0, ge=0, le=3650),
     include_mock: bool = False,
     query: Optional[str] = Query(None, description="Optional keyword filter"),
+    # NEW: light pagination to avoid giant payloads
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ) -> EventsResponse:
     """
     Aggregated events search.
@@ -73,6 +90,8 @@ async def search(
             start_in_days=start_in_days,
             include_mock=include_mock,
             query=query,
+            limit=limit,               # NEW
+            offset=offset,             # NEW
         )
 
         raw_items: List[Dict[str, Any]] = list(agg_payload.get("items") or [])
@@ -86,11 +105,10 @@ async def search(
             except ValidationError as ve:
                 nonfatal_errors.append(f"item#{idx} validation failed: {ve}")
 
-        # Optional: rank results
+        # Optional: rank results (shield from errors)
         try:
             valid_items = rank_events(valid_items, city=city_clean, country=country_clean)
-        except Exception as _:
-            # don't let ranking failures break the endpoint
+        except Exception:
             pass
 
         return EventsResponse(
@@ -99,11 +117,8 @@ async def search(
             count=len(valid_items),
             items=valid_items,
             errors=nonfatal_errors,
-            debug={
-                "providers_used": agg_payload.get("providers_used"),
-                "discovered": (agg_payload.get("debug") or {}).get("discovered"),
-                "provider_errors": (agg_payload.get("debug") or {}).get("errors"),
-            },
+            # Surface the entire debug block so you can see provider_errors
+            debug=agg_payload.get("debug"),
         )
 
     except HTTPException:
