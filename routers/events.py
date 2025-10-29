@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from services.recommend import rank_events
 from services.aggregator import (
-    list_providers as agg_list_providers,          # unchanged (legacy simple list)
-    list_provider_diagnostics as agg_diag,         # NEW: rich diagnostics (add this in aggregator if missing)
-    search_events as agg_search_events,            # <-- async
+    list_providers as agg_list_providers,         
+    list_provider_diagnostics as agg_diag,         
+    search_events as agg_search_events,            
 )
 from schemas import EventOut
 
@@ -18,9 +18,7 @@ router = APIRouter(prefix="/events", tags=["events"])
 
 # ---------- Responses ----------
 class ProvidersResponse(BaseModel):
-    # keep your original list for backward-compat
     providers: List[Dict[str, str]] = Field(default_factory=list)
-    # add diagnostics so you can see discovered modules & errors on Render
     discovery: Optional[Dict[str, Any]] = None
 
 
@@ -40,7 +38,7 @@ def get_providers(include_mock: Optional[bool] = None) -> ProvidersResponse:
     Return both the legacy simple list and the rich diagnostics.
     The diagnostics include: discovered_modules, loaded, skipped, and import errors.
     """
-    # fall back if agg_diag isn't available in your current aggregator
+
     try:
         diag = agg_diag()
         simple = diag.get("providers") or agg_list_providers(include_mock=include_mock)
@@ -98,7 +96,6 @@ async def search(
         nonfatal_errors: List[str] = []
         valid_items: List[EventOut] = []
 
-        # Validate/normalize each event through your schema
         for idx, e in enumerate(raw_items):
             try:
                 valid_items.append(EventOut.model_validate(e))  # pydantic v2
@@ -117,7 +114,6 @@ async def search(
             count=len(valid_items),
             items=valid_items,
             errors=nonfatal_errors,
-            # Surface the entire debug block so you can see provider_errors
             debug=agg_payload.get("debug"),
         )
 
