@@ -1,4 +1,3 @@
-# providers/icsfeed.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -92,3 +91,13 @@ class ICSProvider:
                     if ok:
                         items.append(e)
         return items
+
+
+def search(*, city: str, country: str, days_ahead: int = 60, start_in_days: int = 0, query: str | None = None):
+    from datetime import datetime, timedelta, timezone
+    urls = settings.ics_urls or []
+    if not urls:
+        return []
+    start = (datetime.now(timezone.utc) + timedelta(days=start_in_days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = (datetime.now(timezone.utc) + timedelta(days=start_in_days + days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
+    return ICSProvider(urls).collect(city=city, country=country, start=start, end=end, query=query)  # use your method names

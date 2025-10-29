@@ -136,3 +136,12 @@ class TicketmasterProvider:
                     items.append(_parse_tm_item(it))
 
         return items
+
+def search(*, city: str, country: str, days_ahead: int = 60, start_in_days: int = 0, query: str | None = None):
+    from datetime import datetime, timedelta, timezone
+    if not settings.ticketmaster_api_key:
+        return []
+    start = (datetime.now(timezone.utc) + timedelta(days=start_in_days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = (datetime.now(timezone.utc) + timedelta(days=start_in_days + days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
+    provider = TicketmasterProvider(settings.ticketmaster_api_key)
+    return provider.collect(city=city, country=country, start=start, end=end, query=query)

@@ -1,5 +1,5 @@
 import httpx
-from base import EventRecord
+from providers.base import EventRecord
 
 SG_BASE = "https://api.seatgeek.com/2/events"
 
@@ -43,5 +43,10 @@ class SeatGeekProvider:
                 url=e.get("url"),
             ))
         return results
-    
+   
+async def search(*, city: str, country: str, days_ahead: int = 60, start_in_days: int = 0, query: str | None = None):
+    if not settings.seatgeek_client_id:
+        return []
+    provider = SeatGeekProvider(settings.seatgeek_client_id, settings.seatgeek_client_secret)
+    return await provider.search(city=city, country=country, start=None, end=None, query=query)
     
