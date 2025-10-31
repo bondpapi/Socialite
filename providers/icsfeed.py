@@ -9,6 +9,13 @@ from services import http
 KEY = "ics"
 NAME = "ICS Feeds"
 
+try:
+    from config import settings  # your existing Settings()
+except Exception:
+    class _S:  # tiny fallback if config isn’t available
+        ics_urls: list[str] = []
+    settings = _S()
+
 class ICSProvider:
     name = KEY
 

@@ -8,6 +8,7 @@ import requests
 from utils.http_client import HttpClient
 from utils.cache import FileCache
 from config import settings
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,14 @@ DEFAULT_SITES = [
     "kakava.lt",
 ]
 CACHE_NS = "web_discovery"
+
+try:
+    from config import settings
+    cache_root = Path(getattr(settings, "cache_dir", "."))  # default to local folder
+except Exception:
+    cache_root = Path(".")
+
+cache = FileCache(cache_root, enabled=True)
 
 
 def _cache() -> FileCache:

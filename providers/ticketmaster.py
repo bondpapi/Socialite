@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import settings
@@ -137,11 +137,28 @@ class TicketmasterProvider:
 
         return items
 
-def search(*, city: str, country: str, days_ahead: int = 60, start_in_days: int = 0, query: str | None = None):
-    from datetime import datetime, timedelta, timezone
-    if not settings.ticketmaster_api_key:
-        return []
-    start = (datetime.now(timezone.utc) + timedelta(days=start_in_days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = (datetime.now(timezone.utc) + timedelta(days=start_in_days + days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
-    provider = TicketmasterProvider(settings.ticketmaster_api_key)
-    return provider.collect(city=city, country=country, start=start, end=end, query=query)
+def search(
+    *,
+    city: str,
+    country: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    query: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    try:
+        from config import settings
+        api_key = getattr(settings, "ticketmaster_api_key", None) or getattr(settings, "TICKETMASTER_API_KEY", None)
+    except Exception:
+        api_key = None
+
+    if start is None or end is None:
+        now = datetime.now(timezone.utc)
+        start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+
+    provider = TicketmasterProvider(api_key)
+    return provider.search(
+        city=city, country=country, start=start, end=end, query=query, limit=limit, offset=offset
+    )

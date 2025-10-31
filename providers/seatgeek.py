@@ -1,5 +1,6 @@
 import httpx
 from providers.base import EventRecord
+from config import settings
 
 SG_BASE = "https://api.seatgeek.com/2/events"
 

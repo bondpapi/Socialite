@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import settings
@@ -129,11 +129,31 @@ class EventbriteProvider:
 
         return items
     
-def search(*, city: str, country: str, days_ahead: int = 60, start_in_days: int = 0, query: str | None = None):
-    from datetime import datetime, timedelta, timezone
-    if not settings.eventbrite_token:
-        return []
-    start = (datetime.now(timezone.utc) + timedelta(days=start_in_days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = (datetime.now(timezone.utc) + timedelta(days=start_in_days + days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
-    provider = EventbriteProvider(settings.eventbrite_token)
-    return provider.collect(city=city, country=country, start=start, end=end, query=query)
+def search(
+    *,
+    city: str,
+    country: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    query: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    # import lazily to avoid import cycles
+    try:
+        from config import settings  # if your provider needs a token from env
+        token = getattr(settings, "eventbrite_token", None) or getattr(settings, "EVENTBRITE_TOKEN", None)
+    except Exception:
+        token = None
+
+    # Compute window if not given
+    if start is None or end is None:
+        now = datetime.now(timezone.utc)
+        start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+
+    provider = EventbriteProvider(token)
+    # IMPORTANT: call .search (your class already implements this), NOT .collect
+    return provider.search(
+        city=city, country=country, start=start, end=end, query=query, limit=limit, offset=offset
+    )
