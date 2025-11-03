@@ -153,7 +153,6 @@ def search(
         end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
 
     provider = EventbriteProvider(token)
-    # IMPORTANT: call .search (your class already implements this), NOT .collect
     return provider.search(
         city=city, country=country, start=start, end=end, query=query, limit=limit, offset=offset
     )
