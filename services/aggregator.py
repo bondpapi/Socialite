@@ -129,7 +129,6 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                     if callable(sfn):
                         def _call(**kw):
                             return sfn(**kw)
-                        # expose real target for inspect.signature
                         try:
                             _call.__wrapped__ = sfn  # type: ignore[attr-defined]
                         except Exception:
@@ -187,13 +186,25 @@ def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetim
     return start, end
 
 def _filter_kwargs(func, **kw):
-    """Pass only params the provider function actually accepts."""
+    """
+    Pass only params the provider function declares explicitly.
+    - unwrap __wrapped__ if present
+    - ignore VAR_POSITIONAL / VAR_KEYWORD
+    - ALWAYS drop limit/offset unless explicitly present in signature
+    """
     try:
-        target = getattr(func, "__wrapped__", func)  # unwrap our wrapper to see real signature
+        target = getattr(func, "__wrapped__", func)  # unwrap our wrapper
         sig = inspect.signature(target)
-        return {k: v for k, v in kw.items() if k in sig.parameters}
+        explicit_params = {
+            name
+            for name, p in sig.parameters.items()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        # Only forward explicitly-declared params
+        filtered = {k: v for k, v in kw.items() if k in explicit_params}
+        return filtered
     except Exception:
-        # conservative fallback: avoid passing limit/offset/days_ahead/start_in_days
+        # Conservative fallback: the safest common set
         common = ("city", "country", "start", "end", "query")
         return {k: v for k, v in kw.items() if k in common}
 

@@ -1,12 +1,22 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
+from utils.cache import FileCache
 from utils.http_client import HttpClient
 from config import settings
 from providers import web_discovery
 
 KEY = "web"
 NAME = "Web Discovery"
+
+try:
+    from config import settings
+    cache_root = Path(getattr(settings, "cache_dir", "."))  # default to current dir
+except Exception:
+    cache_root = Path(".")
+
+cache = FileCache(cache_root, enabled=True)
 
 def search(
     *,
