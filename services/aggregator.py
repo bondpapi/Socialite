@@ -100,9 +100,8 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                     if callable(sfn):
                         def _call(**kw):
                             return sfn(**kw)
-                        # expose real target for inspect.signature
                         try:
-                            _call.__wrapped__ = sfn  # type: ignore[attr-defined]
+                            _call.__wrapped__ = sfn  # let inspect.signature see real target
                         except Exception:
                             pass
                         prov = Provider(
@@ -130,7 +129,7 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                         def _call(**kw):
                             return sfn(**kw)
                         try:
-                            _call.__wrapped__ = sfn  # type: ignore[attr-defined]
+                            _call.__wrapped__ = sfn
                         except Exception:
                             pass
                         prov = Provider(
@@ -187,24 +186,20 @@ def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetim
 
 def _filter_kwargs(func, **kw):
     """
-    Pass only params the provider function declares explicitly.
+    Pass only params the provider function explicitly declares.
     - unwrap __wrapped__ if present
-    - ignore VAR_POSITIONAL / VAR_KEYWORD
-    - ALWAYS drop limit/offset unless explicitly present in signature
+    - ignore *args/**kwargs
     """
     try:
-        target = getattr(func, "__wrapped__", func)  # unwrap our wrapper
+        target = getattr(func, "__wrapped__", func)
         sig = inspect.signature(target)
-        explicit_params = {
+        explicit = {
             name
             for name, p in sig.parameters.items()
             if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         }
-        # Only forward explicitly-declared params
-        filtered = {k: v for k, v in kw.items() if k in explicit_params}
-        return filtered
+        return {k: v for k, v in kw.items() if k in explicit}
     except Exception:
-        # Conservative fallback: the safest common set
         common = ("city", "country", "start", "end", "query")
         return {k: v for k, v in kw.items() if k in common}
 
@@ -241,10 +236,8 @@ async def _call_provider(
     limit: int,
     offset: int,
 ) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
-    raw_kwargs = dict(
-        city=city, country=country, start=start, end=end,
-        query=query, limit=limit, offset=offset
-    )
+    # IMPORTANT: do NOT forward limit/offset to providers
+    raw_kwargs = dict(city=city, country=country, start=start, end=end, query=query)
     kwargs = _filter_kwargs(p.fn, **raw_kwargs)
     try:
         if p.is_async:
