@@ -98,8 +98,13 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                     inst = ProvCls()
                     sfn = getattr(inst, "search", None)
                     if callable(sfn):
-                        def _call(**kw):  # call bound method
+                        def _call(**kw):
                             return sfn(**kw)
+                        # expose real target for inspect.signature
+                        try:
+                            _call.__wrapped__ = sfn  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                         prov = Provider(
                             key=key,
                             module=mod_name,
@@ -124,6 +129,11 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                     if callable(sfn):
                         def _call(**kw):
                             return sfn(**kw)
+                        # expose real target for inspect.signature
+                        try:
+                            _call.__wrapped__ = sfn  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
                         prov = Provider(
                             key=key,
                             module=mod_name,
@@ -139,7 +149,9 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                 except Exception as e:
                     _DISCOVERY["errors"][mod_name] = f"get_provider() failed: {e}"
 
-            _DISCOVERY["skipped"].append({"module": mod_name, "reason": "no_search_function"})
+            _DISCOVERY["skipped"].append(
+                {"module": mod_name, "reason": "no_search_function"}
+            )
         except Exception as e:
             _DISCOVERY["errors"][mod_name] = f"{type(e).__name__}: {e}"
 
@@ -175,13 +187,14 @@ def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetim
     return start, end
 
 def _filter_kwargs(func, **kw):
-    """Pass only params the provider function accepts."""
+    """Pass only params the provider function actually accepts."""
     try:
-        sig = inspect.signature(func)
-        allowed = {k: v for k, v in kw.items() if k in sig.parameters}
-        return allowed
+        target = getattr(func, "__wrapped__", func)  # unwrap our wrapper to see real signature
+        sig = inspect.signature(target)
+        return {k: v for k, v in kw.items() if k in sig.parameters}
     except Exception:
-        common = ("city", "country", "start", "end", "query", "limit", "offset")
+        # conservative fallback: avoid passing limit/offset/days_ahead/start_in_days
+        common = ("city", "country", "start", "end", "query")
         return {k: v for k, v in kw.items() if k in common}
 
 def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -217,7 +230,6 @@ async def _call_provider(
     limit: int,
     offset: int,
 ) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
-    # build broad kwargs then filter to what the provider supports
     raw_kwargs = dict(
         city=city, country=country, start=start, end=end,
         query=query, limit=limit, offset=offset

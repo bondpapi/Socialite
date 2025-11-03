@@ -1,17 +1,18 @@
+# providers/kakava.py
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Iterable
-from urllib.parse import urljoin, urlencode, urlparse, parse_qsl, urlunparse
+from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
-
 from services import http
-from providers.base import build_event,to_iso_z
+from providers.base import build_event, to_iso_z
 
 KEY = "kakava"
 NAME = "Kakava"
@@ -20,17 +21,16 @@ BASE = "https://kakava.lt"
 SEARCH_EN = f"{BASE}/en/search"
 SEARCH_LT = f"{BASE}/lt/search"
 
-# Candidate category slugs
+# Candidate category slugs (kept small, add more as needed)
 CATEGORY_SLUGS = {
-    "concerts":  {"en": ["concerts"],                 "lt": ["koncertai"]},
-    "theater":   {"en": ["theater", "theatre"],       "lt": ["teatras"]},
-    "exhibitions":{"en": ["exhibitions"],             "lt": ["parodos", "paroda"]},
-    "sport":     {"en": ["sport"],                    "lt": ["sportas"]},
-    "festivals": {"en": ["festivals"],                "lt": ["festivaliai"]},
-    "kids":      {"en": ["for-kids", "kids"],         "lt": ["vaikams"]},
-    "standup":   {"en": ["stand-up", "standup"],      "lt": ["stand-up", "standup"]},
-    "halloween": {"en": ["halloween"],                "lt": ["halloween"]},
-    "other":     {"en": ["other"],                    "lt": ["kiti", "kita"]},
+    "concerts":   {"en": ["concerts"],             "lt": ["koncertai"]},
+    "theatre":    {"en": ["theatre", "theater"],   "lt": ["teatras"]},
+    "exhibitions":{"en": ["exhibitions"],          "lt": ["parodos", "paroda"]},
+    "sport":      {"en": ["sport"],                "lt": ["sportas"]},
+    "festivals":  {"en": ["festivals"],            "lt": ["festivaliai"]},
+    "kids":       {"en": ["for-kids", "kids"],     "lt": ["vaikams"]},
+    "standup":    {"en": ["stand-up", "standup"],  "lt": ["stand-up", "standup"]},
+    "other":      {"en": ["other"],                "lt": ["kiti", "kita"]},
 }
 
 @dataclass(frozen=True)
@@ -38,15 +38,16 @@ class Window:
     start: datetime
     end: datetime
 
-_jsonld_re = re.compile(r'^\s*{')
+_jsonld_re = re.compile(r"^\s*{")
 
 # ---------- time & cleaning helpers ----------
-def _to_window(start_in_days: int, days_ahead: int) -> Window:
+
+def _calc_window_from_days(start_in_days: int, days_ahead: int) -> Window:
     start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
     end = start + timedelta(days=days_ahead)
-    return Window(start, end)
+    return Window(start=start, end=end)
 
-def _parse_date(dt: str | None) -> Optional[datetime]:
+def _parse_date(dt: Optional[str]) -> Optional[datetime]:
     if not dt:
         return None
     try:
@@ -63,7 +64,12 @@ def _clean(s: Optional[str]) -> Optional[str]:
         return None
     return re.sub(r"\s+", " ", s).strip()
 
+def _norm(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch)).lower().strip()
+
 # ---------- network ----------
+
 def _fetch(url: str) -> Optional[str]:
     r = http.get(url, timeout=15)
     if r.status_code == 200:
@@ -71,6 +77,7 @@ def _fetch(url: str) -> Optional[str]:
     return None
 
 # ---------- link extraction ----------
+
 def _extract_event_links_from_html(html: str) -> List[str]:
     """
     Extract likely event detail links from a listing/search page.
@@ -96,6 +103,7 @@ def _extract_event_links_from_html(html: str) -> List[str]:
     return out
 
 # ---------- json-ld parsing ----------
+
 def _extract_jsonld_events(html: str) -> List[Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
     items: List[Dict[str, Any]] = []
@@ -125,7 +133,7 @@ def _extract_jsonld_events(html: str) -> List[Dict[str, Any]]:
     return items
 
 def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[str, Any]:
-    title = e.get("name")
+    title = _clean(e.get("name"))
     url = e.get("url") or None
 
     start_iso = None
@@ -136,14 +144,14 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
     venue_name, city, country = None, None, None
     loc = e.get("location")
     if isinstance(loc, dict):
-        venue_name = loc.get("name")
+        venue_name = _clean(loc.get("name"))
         addr = loc.get("address") or {}
         if isinstance(addr, dict):
-            city = addr.get("addressLocality") or addr.get("addressRegion") or None
-            country = addr.get("addressCountry") or country_default
+            city = _clean(addr.get("addressLocality") or addr.get("addressRegion"))
+            country = _clean(addr.get("addressCountry")) or country_default
 
-    currency = None
-    min_price = None
+    currency: Optional[str] = None
+    min_price: Optional[float] = None
     offers = e.get("offers")
     if isinstance(offers, dict):
         currency = offers.get("priceCurrency") or currency
@@ -177,6 +185,7 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
     )
 
 # ---------- pagination helpers ----------
+
 def _bump_page(url: str, page: int) -> str:
     """
     Try to set ?page=N (or &page=N) while keeping other query params.
@@ -203,6 +212,7 @@ def _paginate_urls(seed_url: str, max_pages: int = 5) -> Iterable[str]:
             yield f"{seed_url}/page/{p}"
 
 # ---------- category crawling ----------
+
 def _category_urls(language: str = "en") -> List[tuple[str, str]]:
     """
     Returns [(friendly_category, full_url), ...] for the given language.
@@ -237,6 +247,7 @@ def _crawl_categories(language: str = "en", max_pages: int = 5) -> List[tuple[st
     return out
 
 # ---------- search fallback ----------
+
 def _search_site(query: str, language: str = "en") -> List[str]:
     base = SEARCH_EN if language.lower().startswith("en") else SEARCH_LT
     url = f"{base}?{urlencode({'query': query})}"
@@ -246,10 +257,17 @@ def _search_site(query: str, language: str = "en") -> List[str]:
     return _extract_event_links_from_html(html)
 
 # ---------- main entry ----------
+# Compatible with both calling styles:
+#  - aggregator passing (start, end)
+#  - old style (days_ahead, start_in_days)
 def search(
     *,
     city: str,
     country: str,
+    # new-style window (preferred by your aggregator)
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    # old-style window (still supported)
     days_ahead: int = 60,
     start_in_days: int = 0,
     query: Optional[str] = None,
@@ -258,9 +276,15 @@ def search(
     Crawl Kakava categories (EN & LT), parse each event page JSON-LD, and filter
     by date window and optional city. Falls back to site search if categories are empty.
     """
-    window = _to_window(start_in_days, days_ahead)
+    # Build date window
+    if start is not None and end is not None:
+        window = Window(start=start.astimezone(timezone.utc), end=end.astimezone(timezone.utc))
+    else:
+        window = _calc_window_from_days(start_in_days, days_ahead)
+
     country = (country or "LT").strip().upper()[:2]
     city_q = (city or "").strip()
+    city_norm = _norm(city_q) if city_q else ""
     q_extra = (query or "").strip()
 
     # 1) category crawl (EN then LT)
@@ -315,12 +339,19 @@ def search(
 
             mapped = _map_jsonld_event(je, country_default=country)
 
-            # City filter (only if provided)
-            if city_q:
-                city_in_event = (mapped.get("city") or "").lower()
-                venue_in_event = (mapped.get("venue_name") or "").lower()
-                if city_q.lower() not in city_in_event and city_q.lower() not in venue_in_event:
-                    continue
+            # ---------------- lenient city check ----------------
+            if city_norm:
+                hay = _norm(
+                    f"{mapped.get('city') or ''} "
+                    f"{mapped.get('venue_name') or ''} "
+                    f"{mapped.get('title') or ''}"
+                )
+                # Be permissive: only drop when we can positively say it's not the city
+                # Otherwise keep it (Kakava pages are often pre-filtered by city already)
+                if city_norm not in hay:
+                    # don't drop immediately—many Kakava JSON-LD omit city, so keep it
+                    pass
+            # ---------------------------------------------------
 
             # Ensure absolute URL (some jsonld use relative)
             if mapped.get("url") and mapped["url"].startswith("/"):

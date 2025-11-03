@@ -23,7 +23,7 @@ CACHE_NS = "web_discovery"
 
 try:
     from config import settings
-    cache_root = Path(getattr(settings, "cache_dir", "."))  # default to local folder
+    cache_root = Path(getattr(settings, "cache_dir", "."))  # default if attribute missing
 except Exception:
     cache_root = Path(".")
 
