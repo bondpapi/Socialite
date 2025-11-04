@@ -3,17 +3,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import settings
-from services import http
-from providers.base import build_event, to_iso_z
+from ..services import http
+from .base import build_event
+from ..config import settings
 
 KEY = "ticketmaster"
 NAME = "Ticketmaster"
 
 TM_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
 
+
 def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
+    # TM expects Z-suffixed ISO
     return start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
     title = it.get("name")
@@ -22,43 +25,34 @@ def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
     start_iso = None
     dates = it.get("dates") or {}
     start_dt = dates.get("start") or {}
-    # Ticketmaster may provide local (dateTime) and UTC (dateTBD flags)
     dt = start_dt.get("dateTime") or start_dt.get("dateTBD") or None
     if isinstance(dt, str):
-        # TM returns ISO with 'Z' or timezone offset; normalize by dropping offset if present
         try:
-            if dt.endswith("Z"):
-                start_iso = dt
-            else:
-                # naive parse, then force Z
-                # Many dt strings are ISO format; we keep as-is if parsing fails
-                start_iso = dt.replace("+00:00", "Z")
+            start_iso = dt if dt.endswith("Z") else dt.replace("+00:00", "Z")
         except Exception:
             start_iso = dt
 
     venue_name = None
     city = None
     country = None
-
     try:
-        venues = it.get("_embedded", {}).get("venues", [])
+        venues = (it.get("_embedded") or {}).get("venues", [])
         if venues:
             v0 = venues[0]
-            venue_name = (v0.get("name") or None)
-            city = (v0.get("city", {}) or {}).get("name") or None
-            country = (v0.get("country", {}) or {}).get("countryCode") or None
+            venue_name = v0.get("name") or None
+            city = (v0.get("city") or {}).get("name") or None
+            country = (v0.get("country") or {}).get("countryCode") or None
     except Exception:
         pass
 
     category = None
-    if it.get("classifications"):
-        try:
-            cls = it["classifications"][0]
-            seg = cls.get("segment", {}).get("name")
-            cat = cls.get("genre", {}).get("name") or seg
-            category = cat
-        except Exception:
-            pass
+    try:
+        if it.get("classifications"):
+            cls = it["classifications"][0] or {}
+            seg = (cls.get("segment") or {}).get("name")
+            category = (cls.get("genre") or {}).get("name") or seg
+    except Exception:
+        pass
 
     currency = None
     min_price = None
@@ -83,6 +77,7 @@ def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
         min_price=min_price,
     )
 
+
 class TicketmasterProvider:
     name = KEY
 
@@ -99,11 +94,10 @@ class TicketmasterProvider:
         query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self.api_key:
-            raise RuntimeError("TICKETMASTER_API_KEY not configured")
+            raise RuntimeError("ticketmaster_api_key not configured")
 
         start_iso, end_iso = _iso_window(start, end)
 
-        # Phase 1: with city
         params = {
             "apikey": self.api_key,
             "countryCode": country,
@@ -116,16 +110,16 @@ class TicketmasterProvider:
         if query:
             params["keyword"] = query
 
-        resp = http.get(TM_URL, params=params, timeout=12)
         items: List[Dict[str, Any]] = []
 
+        resp = http.get(TM_URL, params=params, timeout=12)
         if resp.status_code == 200:
             data = resp.json() or {}
             events = (data.get("_embedded") or {}).get("events") or []
             for it in events:
                 items.append(_parse_tm_item(it))
 
-        # If city-level returned nothing, broaden to country only
+        # If no results for city, broaden search by removing city constraint
         if not items:
             params.pop("city", None)
             resp2 = http.get(TM_URL, params=params, timeout=12)
@@ -137,28 +131,21 @@ class TicketmasterProvider:
 
         return items
 
-def search(
+
+async def search(
     *,
     city: str,
     country: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     query: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-):
-    try:
-        from config import settings
-        api_key = getattr(settings, "ticketmaster_api_key", None) or getattr(settings, "TICKETMASTER_API_KEY", None)
-    except Exception:
-        api_key = None
+) -> List[Dict[str, Any]]:
+    api_key = getattr(settings, "ticketmaster_api_key", None)
 
     if start is None or end is None:
         now = datetime.now(timezone.utc)
-        start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
 
     provider = TicketmasterProvider(api_key)
-    return provider.search(
-        city=city, country=country, start=start, end=end, query=query, limit=limit, offset=offset
-    )
+    return await provider.search(city=city, country=country, start=start, end=end, query=query)
