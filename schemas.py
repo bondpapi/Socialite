@@ -26,7 +26,7 @@ class EventOut(BaseModel):
     external_id: str
     title: str
     category: str
-    start_time: datetime
+    start_time: Optional[str] = Field(default=None, description="ISO-8601 start time or null")
     city: str
     country: str
     venue_name: Optional[str] = None
