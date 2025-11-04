@@ -4,17 +4,19 @@ from pathlib import Path
 
 from utils.cache import FileCache
 from utils.http_client import HttpClient
-from config import settings
 from providers import web_discovery
 
 KEY = "web"
 NAME = "Web Discovery"
 
+# Optional settings
 try:
-    from config import settings
-    cache_root = Path(getattr(settings, "cache_dir", "."))  # default to current dir
+    from config import settings  # type: ignore
+    cache_root = Path(getattr(settings, "cache_dir", "."))
+    http_timeout = float(getattr(settings, "http_timeout_seconds", 8.0))
 except Exception:
     cache_root = Path(".")
+    http_timeout = 8.0
 
 cache = FileCache(cache_root, enabled=True)
 
@@ -26,18 +28,17 @@ def search(
     start_in_days: int = 0,
     query: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    client = HttpClient(timeout=settings.http_timeout_seconds)
+    client = HttpClient(timeout=http_timeout)
 
     items = web_discovery.crawl_sites(
         client=client,
         city=city,
         country=country,
-        allow_domains=None, 
+        allow_domains=None,
         keyword=query,
         limit_per_site=25,
     )
 
-    # Conform to aggregator schema and fill blanks
     out: List[Dict[str, Any]] = []
     for it in items:
         it.setdefault("source", KEY)

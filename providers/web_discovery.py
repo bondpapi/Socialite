@@ -3,12 +3,10 @@ from typing import Any, Dict, Iterable, List, Optional
 import logging
 import re
 import json
-import requests
+from pathlib import Path
 
 from utils.http_client import HttpClient
 from utils.cache import FileCache
-from config import settings
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +19,24 @@ DEFAULT_SITES = [
 ]
 CACHE_NS = "web_discovery"
 
+# Optional settings (safe defaults)
 try:
-    from config import settings
-    cache_root = Path(getattr(settings, "cache_dir", "."))  # default to current dir
+    from config import settings  # type: ignore
+    cache_root = Path(getattr(settings, "cache_dir", "."))
+    cache_enabled = bool(getattr(settings, "cache_enabled", True))
+    cache_ttl = float(getattr(settings, "web_cache_ttl_seconds", 3600.0))
 except Exception:
     cache_root = Path(".")
+    cache_enabled = True
+    cache_ttl = 3600.0
 
-cache = FileCache(cache_root, enabled=True)
-
-
-def _cache() -> FileCache:
-    from pathlib import Path
-
-    return FileCache(Path(settings.cache_dir), enabled=settings.cache_enabled)
-
+cache = FileCache(cache_root, enabled=cache_enabled)
 
 def _looks_like_event_title(text: str) -> bool:
     if not text:
         return False
     bad = {"cookies", "privacy", "login", "terms"}
     return not any(w in text.lower() for w in bad)
-
 
 def _extract_events_from_html(html: str, *, city: str, country: str) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
@@ -65,7 +60,6 @@ def _extract_events_from_html(html: str, *, city: str, country: str) -> List[Dic
                 }
             )
     return items
-
 
 def crawl_sites(
     *,
@@ -96,10 +90,10 @@ def crawl_sites(
                 logger.info("Web discovery error for %s: %s", url, e)
                 return ""
 
-        html = _cache().get_or_set(
+        html = cache.get_or_set(
             CACHE_NS,
             cache_key,
-            max_age=float(settings.web_cache_ttl_seconds),
+            max_age=cache_ttl,
             producer=_fetch_html,
         )
 
