@@ -1,42 +1,39 @@
+# providers/ticketmaster.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..services import http
-from .base import build_event
-from ..config import settings
+from services import http
+from providers.base import build_event, to_iso_z
 
 KEY = "ticketmaster"
 NAME = "Ticketmaster"
-
 TM_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
 
-
 def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
-    # TM expects Z-suffixed ISO
-    return start.strftime("%Y-%m-%dT%H:%M:%SZ"), end.strftime("%Y-%m-%dT%H:%M:%SZ")
-
+    return to_iso_z(start), to_iso_z(end)
 
 def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
     title = it.get("name")
     url = it.get("url")
+    description = it.get("info") or it.get("pleaseNote") or None
 
+    # start time
     start_iso = None
-    dates = it.get("dates") or {}
-    start_dt = dates.get("start") or {}
-    dt = start_dt.get("dateTime") or start_dt.get("dateTBD") or None
-    if isinstance(dt, str):
-        try:
+    try:
+        dt = ((it.get("dates") or {}).get("start") or {}).get("dateTime")
+        if isinstance(dt, str):
             start_iso = dt if dt.endswith("Z") else dt.replace("+00:00", "Z")
-        except Exception:
-            start_iso = dt
+    except Exception:
+        pass
 
+    # venue/city/country
     venue_name = None
     city = None
     country = None
     try:
-        venues = (it.get("_embedded") or {}).get("venues", [])
+        venues = (it.get("_embedded") or {}).get("venues", []) or []
         if venues:
             v0 = venues[0]
             venue_name = v0.get("name") or None
@@ -45,23 +42,33 @@ def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # category
     category = None
     try:
-        if it.get("classifications"):
-            cls = it["classifications"][0] or {}
-            seg = (cls.get("segment") or {}).get("name")
-            category = (cls.get("genre") or {}).get("name") or seg
+        cls = (it.get("classifications") or [])[0]
+        seg = (cls.get("segment") or {}).get("name")
+        cat = (cls.get("genre") or {}).get("name") or seg
+        category = cat
     except Exception:
         pass
 
-    currency = None
-    min_price = None
+    # image
+    image_url = None
     try:
-        price_ranges = it.get("priceRanges") or []
-        if price_ranges:
-            pr = price_ranges[0]
-            currency = pr.get("currency")
-            min_price = pr.get("min")
+        imgs = it.get("images") or []
+        if imgs:
+            # pick the first (TM usually has many sizes)
+            image_url = imgs[0].get("url")
+    except Exception:
+        pass
+
+    # price
+    currency, min_price = None, None
+    try:
+        pr = (it.get("priceRanges") or [])
+        if pr:
+            currency = pr[0].get("currency")
+            min_price = pr[0].get("min")
     except Exception:
         pass
 
@@ -73,14 +80,16 @@ def _parse_tm_item(it: Dict[str, Any]) -> Dict[str, Any]:
         url=url,
         venue_name=venue_name,
         category=category,
+        description=description,
+        image_url=image_url,
         currency=currency,
         min_price=min_price,
+        external_id=str(it.get("id") or ""),
+        source=KEY,
     )
-
 
 class TicketmasterProvider:
     name = KEY
-
     def __init__(self, api_key: Optional[str]) -> None:
         self.api_key = api_key
 
@@ -94,10 +103,9 @@ class TicketmasterProvider:
         query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self.api_key:
-            raise RuntimeError("ticketmaster_api_key not configured")
+            return []
 
         start_iso, end_iso = _iso_window(start, end)
-
         params = {
             "apikey": self.api_key,
             "countryCode": country,
@@ -115,37 +123,36 @@ class TicketmasterProvider:
         resp = http.get(TM_URL, params=params, timeout=12)
         if resp.status_code == 200:
             data = resp.json() or {}
-            events = (data.get("_embedded") or {}).get("events") or []
-            for it in events:
+            for it in ((data.get("_embedded") or {}).get("events") or []):
                 items.append(_parse_tm_item(it))
 
-        # If no results for city, broaden search by removing city constraint
         if not items:
             params.pop("city", None)
             resp2 = http.get(TM_URL, params=params, timeout=12)
             if resp2.status_code == 200:
                 data2 = resp2.json() or {}
-                events2 = (data2.get("_embedded") or {}).get("events") or []
-                for it in events2:
+                for it in ((data2.get("_embedded") or {}).get("events") or []):
                     items.append(_parse_tm_item(it))
 
         return items
 
-
-async def search(
+def search(
     *,
     city: str,
     country: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     query: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    api_key = getattr(settings, "ticketmaster_api_key", None)
+):
+    try:
+        from config import settings
+        api_key = getattr(settings, "ticketmaster_api_key", None) or getattr(settings, "TICKETMASTER_API_KEY", None)
+    except Exception:
+        api_key = None
 
-    if start is None or end is None:
-        now = datetime.now(timezone.utc)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+    now = datetime.now(timezone.utc)
+    start = (start or now.replace(hour=0, minute=0, second=0, microsecond=0))
+    end = (end or (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0))
 
     provider = TicketmasterProvider(api_key)
-    return await provider.search(city=city, country=country, start=start, end=end, query=query)
+    return provider.search(city=city, country=country, start=start, end=end, query=query)

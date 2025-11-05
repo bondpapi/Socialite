@@ -1,3 +1,4 @@
+# providers/eventbrite.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,14 +9,10 @@ from providers.base import build_event, to_iso_z
 
 KEY = "eventbrite"
 NAME = "Eventbrite"
-
 EB_URL = "https://www.eventbriteapi.com/v3/events/search/"
 
-
 def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
-    # Eventbrite expects ISO Z strings
     return to_iso_z(start), to_iso_z(end)
-
 
 def _parse_venue(venue: Dict[str, Any]) -> Dict[str, Optional[str]]:
     name = venue.get("name") or None
@@ -24,15 +21,16 @@ def _parse_venue(venue: Dict[str, Any]) -> Dict[str, Optional[str]]:
     country = address.get("country") or None
     return {"venue_name": name, "city": city, "country": country}
 
-
 def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    title = e.get("name", {}).get("text") or e.get("name") or None
+    title = (e.get("name") or {}).get("text") or e.get("name") or None
     url = e.get("url")
+    description = (e.get("description") or {}).get("text") or None
+    image_url = (e.get("logo") or {}).get("url") or None
     category = e.get("category_id") or None
 
     start_iso = None
     try:
-        start_iso = e.get("start", {}).get("utc") or None
+        start_iso = (e.get("start") or {}).get("utc") or None
         if start_iso and not start_iso.endswith("Z"):
             start_iso = start_iso.replace("+00:00", "Z")
     except Exception:
@@ -47,6 +45,7 @@ def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dic
         city = parsed["city"]
         country = parsed["country"]
 
+    # Eventbrite ticket classes are on a different endpoint; keep price fields None here.
     return build_event(
         title=title,
         start_time=start_iso,
@@ -55,14 +54,16 @@ def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dic
         url=url,
         venue_name=venue_name,
         category=category,
+        description=description,
+        image_url=image_url,
         currency=None,
         min_price=None,
+        external_id=str(e.get("id") or ""),
+        source=KEY,
     )
-
 
 class EventbriteProvider:
     name = KEY
-
     def __init__(self, token: Optional[str]) -> None:
         self.token = token
 
@@ -70,13 +71,13 @@ class EventbriteProvider:
         self,
         *,
         city: str,
-        country: str,  # not directly supported by EB search, kept for interface parity
+        country: str,
         start: datetime,
         end: datetime,
         query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not self.token:
-            raise RuntimeError("EVENTBRITE_TOKEN not configured")
+            return []
 
         start_iso, end_iso = _iso_window(start, end)
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -112,7 +113,6 @@ class EventbriteProvider:
             collect(resp.json() or {})
 
         if not items:
-            # broaden (drop city, increase radius)
             params.pop("location.address", None)
             params["location.within"] = "400km"
             resp2 = http.get(EB_URL, params=params, headers=headers, timeout=12)
@@ -121,26 +121,23 @@ class EventbriteProvider:
 
         return items
 
-
-# ---- module-level entry used by the aggregator (must be async; no limit/offset!) ----
-async def search(
+def search(
     *,
     city: str,
     country: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     query: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+):
     try:
-        from config import settings  # type: ignore
+        from config import settings
         token = getattr(settings, "eventbrite_token", None) or getattr(settings, "EVENTBRITE_TOKEN", None)
     except Exception:
         token = None
 
-    if start is None or end is None:
-        now = datetime.now(timezone.utc)
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+    now = datetime.now(timezone.utc)
+    start = (start or now.replace(hour=0, minute=0, second=0, microsecond=0))
+    end = (end or (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0))
 
     provider = EventbriteProvider(token)
-    return await provider.search(city=city, country=country, start=start, end=end, query=query)
+    return provider.search(city=city, country=country, start=start, end=end, query=query)
