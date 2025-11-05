@@ -1,4 +1,3 @@
-# providers/kakava.py
 from __future__ import annotations
 
 import json
@@ -150,6 +149,14 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
             city = _clean(addr.get("addressLocality") or addr.get("addressRegion"))
             country = _clean(addr.get("addressCountry")) or country_default
 
+    # NEW: try to extract description and image
+    description = e.get("description") or None
+    image_url = e.get("image")
+    if isinstance(image_url, list) and image_url:
+        image_url = image_url[0]
+    elif not isinstance(image_url, str):
+        image_url = None
+
     currency: Optional[str] = None
     min_price: Optional[float] = None
     offers = e.get("offers")
@@ -180,8 +187,13 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
         url=url,
         venue_name=venue_name,
         category=e.get("eventType"),
+        # added enrichments:
+        description=description,
+        image_url=image_url,
         currency=currency,
         min_price=min_price,
+        external_id=url,
+        source=KEY,
     )
 
 # ---------- pagination helpers ----------
@@ -347,9 +359,7 @@ def search(
                     f"{mapped.get('title') or ''}"
                 )
                 # Be permissive: only drop when we can positively say it's not the city
-                # Otherwise keep it (Kakava pages are often pre-filtered by city already)
                 if city_norm not in hay:
-                    # don't drop immediately—many Kakava JSON-LD omit city, so keep it
                     pass
             # ---------------------------------------------------
 
