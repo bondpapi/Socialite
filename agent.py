@@ -1,3 +1,4 @@
+# agent.py (root)
 from __future__ import annotations
 
 import json
@@ -8,7 +9,6 @@ from pydantic import BaseModel
 
 from services.aggregator import search_events_sync
 from services import storage
-
 
 _client = OpenAI()
 
@@ -34,23 +34,10 @@ TOOLS = [
                 "properties": {
                     "city": {"type": "string"},
                     "country": {"type": "string", "description": "ISO-2 country code"},
-                    "days_ahead": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 365,
-                        "default": 30,
-                    },
-                    "start_in_days": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": 365,
-                        "default": 0,
-                    },
+                    "days_ahead": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30},
+                    "start_in_days": {"type": "integer", "minimum": 0, "maximum": 365, "default": 0},
                     "include_mock": {"type": "boolean", "default": False},
-                    "query": {
-                        "type": "string",
-                        "description": "Keyword like 'tech', 'sports', 'jazz'.",
-                    },
+                    "query": {"type": "string", "description": "Keyword like 'tech', 'sports', 'jazz'."},
                 },
                 "required": ["city", "country"],
             },
@@ -94,9 +81,11 @@ TOOLS = [
     },
 ]
 
-# ---- Local tool dispatchers ----
+# ---- capture last tool result so the API can return items ----
+_LAST_TOOL_RESULT: Dict[str, Any] = {}
 
 def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    global _LAST_TOOL_RESULT
     try:
         data = search_events_sync(
             city=args["city"],
@@ -107,11 +96,11 @@ def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
             query=args.get("query"),
         )
         storage.log_event_search(user_id, args, count=data.get("count", 0))
+        _LAST_TOOL_RESULT = data  # <-- expose to caller
         return data
     except Exception as exc:
-        return {"count": 0, "items": [], "error": f"search failed: {exc!r}"}
-
-
+        _LAST_TOOL_RESULT = {"count": 0, "items": [], "error": f"search failed: {exc!r}"}
+        return _LAST_TOOL_RESULT
 
 def tool_save_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     storage.save_preferences(
@@ -122,17 +111,14 @@ def tool_save_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {"ok": True}
 
-
 def tool_get_preferences(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     prefs = storage.get_preferences(user_id) or {}
     return {"preferences": prefs}
-
 
 def tool_subscribe_digest(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
     freq = args.get("frequency", "weekly")
     storage.upsert_subscription(user_id, frequency=freq)
     return {"ok": True, "frequency": freq}
-
 
 TOOL_MAP = {
     "tool_search_events": tool_search_events,
@@ -146,7 +132,7 @@ TOOL_MAP = {
 class AgentTurn(BaseModel):
     reply: str
     used_tools: List[str] = []
-
+    last_tool_result: Optional[Dict[str, Any]] = None  # <-- added
 
 def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
     if not s:
@@ -156,14 +142,15 @@ def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
     except Exception:
         return {}
 
-
 def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTurn:
+    global _LAST_TOOL_RESULT
+    _LAST_TOOL_RESULT = {}
+
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": message},
     ]
 
-    # Initial LLM call
     resp = _client.chat.completions.create(
         model=model,
         messages=messages,
@@ -181,18 +168,13 @@ def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTu
             name = call.function.name
             args = _safe_json_loads(call.function.arguments)
             fn = TOOL_MAP.get(name)
-
             if not fn:
                 tool_result = {"error": f"Unknown tool {name}"}
             else:
                 tool_result = fn(user_id, args)
                 used_tools.append(name)
 
-            # echo tool call + result back to the model
-            messages.append({
-                "role": "assistant",
-                "tool_calls": [call],
-            })
+            messages.append({"role": "assistant", "tool_calls": [call]})
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -210,4 +192,4 @@ def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTu
         msg = resp.choices[0].message
 
     reply_text = (msg.content or "").strip()
-    return AgentTurn(reply=reply_text, used_tools=used_tools)
+    return AgentTurn(reply=reply_text, used_tools=used_tools, last_tool_result=_LAST_TOOL_RESULT)

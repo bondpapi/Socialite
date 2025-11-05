@@ -8,20 +8,20 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Optional real agent + scheduler 
-_agent_impl = None
-_digest_impl = None
+# Try real agent in services.agent, then root-level agent.py, else None
+_services_agent = None
+_root_agent = None
 try:
-    from services import agent as _agent_impl
+    from services import agent as _services_agent  # optional
 except Exception:
-    _agent_impl = None
+    _services_agent = None
 
 try:
-    from services import scheduler as _digest_impl
+    import agent as _root_agent 
 except Exception:
-    _digest_impl = None
+    _root_agent = None
 
-# Lightweight fallback: call the aggregator directly
+# Fallback search (so Chat still works without an LLM)
 _agg_sync = None
 try:
     from services.aggregator import search_events_sync as _agg_sync
@@ -29,7 +29,7 @@ except Exception:
     _agg_sync = None
 
 
-# ----------------------------- models ---------------------------------
+# ---------------- models ----------------
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -48,54 +48,45 @@ class SubscribeRequest(BaseModel):
     user_id: str
     city: str
     country: str
-    cadence: str = "WEEKLY"  # e.g., DAILY/WEEKLY
+    cadence: str = "WEEKLY"
     keywords: Optional[List[str]] = None
 
 
-# ---------------------------- helpers ----------------------------------
+# --------------- tiny intent helpers ---------------
 
 _CITY_HINT = re.compile(r"\b(?:in|around|near)\s+([A-Za-zÀ-ž\-\.'\s]{2,})\b", re.I)
-_COUNTRY_ISO2 = re.compile(r"\b(country|cc)\s*[:=]\s*([A-Za-z]{2})\b", re.I)
+_COUNTRY_ISO2 = re.compile(r"\b(?:country|cc)\s*[:=]\s*([A-Za-z]{2})\b", re.I)
 
 def _infer_city_country(message: str, fallback_city: Optional[str], fallback_country: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Very light heuristic:
-      - "in Vilnius", "near Kaunas" → city
-      - "country: LT" or "cc=LT" → ISO-2
-    """
     city = fallback_city
     m = _CITY_HINT.search(message or "")
     if m:
         city = m.group(1).strip(" .,")
-
     country = (fallback_country or "")
     m2 = _COUNTRY_ISO2.search(message or "")
     if m2:
-        country = m2.group(2).upper()
-
+        country = m2.group(1).upper()
     return (city, country or None)
-
 
 def _short_answer(city: Optional[str], country: Optional[str], total: int) -> str:
     loc = ", ".join([p for p in [city, country] if p])
     loc = f" in {loc}" if loc else ""
     noun = "event" if total == 1 else "events"
-    return f"I found {total} {noun}{loc}. Here are a few you might like."
+    return f"I found {total} {noun}{loc}. Here are some picks."
 
 
-# ---------------------------- routes -----------------------------------
+# ---------------- routes ----------------
 
 @router.post("/chat")
 def chat(req: ChatRequest) -> Dict[str, Any]:
     """
-    Chat with Socialite.
-    - If a real agent service exists: delegate to it.
-    - Otherwise: do a practical search via the aggregator and return items.
+    If a real agent is available, use it and surface its last tool result (items).
+    Otherwise do a pragmatic aggregator search as a fallback.
     """
-    # 1) full LLM agent would take priority.
-    if _agent_impl and hasattr(_agent_impl, "chat"):
+    
+    if _services_agent and hasattr(_services_agent, "chat"):
         try:
-            return _agent_impl.chat(
+            return _services_agent.chat(
                 user_id=req.user_id,
                 message=req.message,
                 username=req.username,
@@ -103,32 +94,38 @@ def chat(req: ChatRequest) -> Dict[str, Any]:
                 country=req.country,
             )
         except Exception as e:
-            return {
-                "ok": False,
-                "answer": "I hit a snag while generating a reply. Try rephrasing or narrowing the request.",
-                "error": str(e),
-            }
+            return {"ok": False, "answer": "Agent had an error. Try again.", "error": str(e)}
 
-    # 2) Fallback: intent-lite → aggregator search
+    if _root_agent and hasattr(_root_agent, "run_agent"):
+        try:
+            turn = _root_agent.run_agent(user_id=req.user_id, message=req.message)
+            last = getattr(turn, "last_tool_result", None) or {}
+            items = last.get("items") or []
+            total = last.get("total") or last.get("count") or len(items)
+            return {
+                "ok": True,
+                "answer": turn.reply,
+                "items": items,
+                "debug": {
+                    "agent": "root_agent",
+                    "used_tools": getattr(turn, "used_tools", []),
+                    "provider_errors": (last.get("debug") or {}).get("provider_errors"),
+                    "providers_used": last.get("providers_used"),
+                },
+            }
+        except Exception as e:
+            # fall through to aggregator
+            pass
+
+    # 3) Fallback: call aggregator directly so Chat is still useful.
     if not _agg_sync:
-        # Last-resort friendly message if aggregator import failed
         return {
             "ok": True,
-            "answer": "I can search events if you tell me a city/country, a date window, or a type like music/sports/arts.",
+            "answer": "Tell me a city (e.g., 'in Vilnius') and optionally a country code (e.g., 'country: LT'), plus keywords.",
             "debug": {"agent": "fallback", "reason": "aggregator_unavailable"},
         }
 
-    # Infer location from text if not provided
     city, country = _infer_city_country(req.message, req.city, req.country)
-
-    # If still missing, nudge user but do not fail
-    if not city and not country:
-        hint = ("Tell me a city (e.g., 'in Vilnius') and optionally a country code "
-                "(e.g., 'country: LT'), plus any keywords.")
-    else:
-        hint = None
-
-    # Use the whole user message as a keyword query (keeps it simple)
     payload = _agg_sync(
         city=city or (req.city or ""),
         country=(country or req.country or "LT"),
@@ -139,62 +136,29 @@ def chat(req: ChatRequest) -> Dict[str, Any]:
         limit=req.limit,
         offset=req.offset,
     )
-
     total = int(payload.get("total") or payload.get("count") or 0)
-    items = payload.get("items") or []
-
     return {
         "ok": True,
         "answer": _short_answer(city, country, total),
-        "items": items,
+        "items": payload.get("items") or [],
         "debug": {
             "agent": "fallback_search",
-            "city": city,
-            "country": country,
-            "limit": req.limit,
-            "offset": req.offset,
-            "window": payload.get("debug", {}).get("window"),
             "providers_used": payload.get("providers_used"),
-            "provider_errors": payload.get("debug", {}).get("provider_errors"),
-            "hint": hint,
+            "provider_errors": (payload.get("debug") or {}).get("provider_errors"),
+            "window": (payload.get("debug") or {}).get("window"),
         },
     }
 
 
 @router.get("/digest/{user_id}")
 def get_digest(user_id: str) -> Dict[str, Any]:
-    """
-    Return the latest digest for a user if a scheduler is present; otherwise a placeholder.
-    """
-    if _digest_impl and hasattr(_digest_impl, "latest_digest_for"):
-        try:
-            digest = _digest_impl.latest_digest_for(user_id)
-            return {"ok": True, "digest": digest}
-        except Exception as e:
-            return {"ok": False, "digest": None, "error": str(e)}
-
+    # placeholder until you wire a scheduler
     return {"ok": True, "digest": None, "debug": {"scheduler": "not_configured"}}
 
 
 @router.post("/subscribe")
 def subscribe(req: SubscribeRequest) -> Dict[str, Any]:
-    """
-    Subscribe the user to a periodic digest. If scheduler isn't available,
-    acknowledge the request so the UI flow succeeds.
-    """
-    if _digest_impl and hasattr(_digest_impl, "subscribe"):
-        try:
-            _digest_impl.subscribe(
-                user_id=req.user_id,
-                city=req.city,
-                country=req.country,
-                cadence=req.cadence,
-                keywords=req.keywords or [],
-            )
-            return {"ok": True, "subscribed": True}
-        except Exception as e:
-            return {"ok": False, "subscribed": False, "error": str(e)}
-
+    # placeholder until you wire a scheduler
     return {
         "ok": True,
         "subscribed": False,
