@@ -21,15 +21,20 @@ class UserOut(BaseModel):
 
 
 class EventOut(BaseModel):
-    id: Optional[int] = None
+    id: Optional[str] = None
+    external_id: Optional[str] = None
     source: str
-    external_id: str
     title: str
-    category: str
-    start_time: Optional[str] = Field(default=None, description="ISO-8601 start time or null")
-    city: str
-    country: str
+    category: Optional[str] = None
+    start_time: Optional[str] = Field(
+        default=None, description="ISO8601 UTC e.g. 2025-11-05T19:00:00Z"
+    )
+    city: Optional[str] = None
+    country: Optional[str] = None
     venue_name: Optional[str] = None
-    min_price: Optional[float] = None
-    currency: Optional[str] = None
     url: Optional[str] = None
+    # New/enriched:
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    currency: Optional[str] = None
+    min_price: Optional[float] = None
