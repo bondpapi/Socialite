@@ -10,7 +10,8 @@ from pydantic import BaseModel
 from services.aggregator import search_events_sync
 from services import storage
 
-_client = OpenAI()
+_client = OpenAI(timeout=15, max_retries=1)
+
 
 SYSTEM_PROMPT = """You are Socialite — a friendly, efficient AI agent that finds
 and plans real-world events. You:
