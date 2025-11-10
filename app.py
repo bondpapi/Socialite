@@ -30,9 +30,9 @@ def _get(path: str, **params) -> Dict[str, Any] | List[Dict[str, Any]]:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _post(path: str, payload: Dict[str, Any], *, timeout: int = 30) -> Dict[str, Any]:
     try:
-        r = requests.post(f"{API}{path}", json=payload, timeout=30)
+        r = requests.post(f"{API}{path}", json=payload, timeout=timeout)
         return r.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -59,6 +59,14 @@ def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
 def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
     city = (p.get("city") or "").strip().title()
     country = (p.get("country") or "").strip().upper()[:2]
+
+    if not city or not country:
+        return {
+            "count": 0,
+            "items": [],
+            "debug": {"reason": "missing_city_or_country", "city": city, "country": country},
+        }
+
     days_ahead = int(p.get("days_ahead") or 120)
     start_in_days = int(p.get("start_in_days") or 0)
     query = (p.get("keywords") or None)

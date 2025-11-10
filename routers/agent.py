@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 _services_agent = None

@@ -133,7 +133,7 @@ TOOL_MAP = {
 class AgentTurn(BaseModel):
     reply: str
     used_tools: List[str] = []
-    last_tool_result: Optional[Dict[str, Any]] = None  # <-- added
+    last_tool_result: Optional[Dict[str, Any]] = None 
 
 def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
     if not s:
@@ -194,3 +194,8 @@ def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTu
 
     reply_text = (msg.content or "").strip()
     return AgentTurn(reply=reply_text, used_tools=used_tools, last_tool_result=_LAST_TOOL_RESULT)
+
+def chat(*, user_id: str, message: str, username: str | None = None,
+         city: str | None = None, country: str | None = None) -> dict:
+    turn = run_agent(user_id=user_id, message=message)
+    return {"ok": True, "answer": turn.reply, "used_tools": turn.used_tools}
