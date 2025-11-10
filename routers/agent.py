@@ -2,34 +2,31 @@ from __future__ import annotations
 
 import re
 from typing import Optional, Dict, Any, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Try real agent in services.agent, then root-level agent.py, else None
 _services_agent = None
 _root_agent = None
 try:
-    from services import agent as _services_agent  # optional
+    from services import agent as _services_agent
 except Exception:
     _services_agent = None
 
 try:
-    import agent as _root_agent 
+    import agent as _root_agent
 except Exception:
     _root_agent = None
 
-# Fallback search (so Chat still works without an LLM)
 _agg_sync = None
 try:
     from services.aggregator import search_events_sync as _agg_sync
 except Exception:
     _agg_sync = None
 
-
-# ---------------- models ----------------
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -43,7 +40,6 @@ class ChatRequest(BaseModel):
     limit: int = 30
     offset: int = 0
 
-
 class SubscribeRequest(BaseModel):
     user_id: str
     city: str
@@ -51,8 +47,6 @@ class SubscribeRequest(BaseModel):
     cadence: str = "WEEKLY"
     keywords: Optional[List[str]] = None
 
-
-# --------------- tiny intent helpers ---------------
 
 _CITY_HINT = re.compile(r"\b(?:in|around|near)\s+([A-Za-zÀ-ž\-\.'\s]{2,})\b", re.I)
 _COUNTRY_ISO2 = re.compile(r"\b(?:country|cc)\s*[:=]\s*([A-Za-z]{2})\b", re.I)
@@ -74,31 +68,36 @@ def _short_answer(city: Optional[str], country: Optional[str], total: int) -> st
     noun = "event" if total == 1 else "events"
     return f"I found {total} {noun}{loc}. Here are some picks."
 
-
-# ---------------- routes ----------------
+_EXEC = ThreadPoolExecutor(max_workers=1)
 
 @router.post("/chat")
 def chat(req: ChatRequest) -> Dict[str, Any]:
     """
-    If a real agent is available, use it and surface its last tool result (items).
-    Otherwise do a pragmatic aggregator search as a fallback.
+    Try a real agent (services.agent or root agent) with a hard timeout.
+    On timeout/error, fall back to aggregator so the UI never waits > ~18s.
     """
-    
+    # 1) If you later add services.agent.chat(), prefer it
     if _services_agent and hasattr(_services_agent, "chat"):
         try:
-            return _services_agent.chat(
-                user_id=req.user_id,
-                message=req.message,
-                username=req.username,
-                city=req.city,
-                country=req.country,
-            )
+            fut = _EXEC.submit(_services_agent.chat,
+                               user_id=req.user_id,
+                               message=req.message,
+                               username=req.username,
+                               city=req.city,
+                               country=req.country)
+            result = fut.result(timeout=18)
+            return result
+        except FuturesTimeout:
+            pass
         except Exception as e:
-            return {"ok": False, "answer": "Agent had an error. Try again.", "error": str(e)}
+            # continue to fallback
+            pass
 
+    # 2) Root agent with timeout
     if _root_agent and hasattr(_root_agent, "run_agent"):
         try:
-            turn = _root_agent.run_agent(user_id=req.user_id, message=req.message)
+            fut = _EXEC.submit(_root_agent.run_agent, req.user_id, req.message)
+            turn = fut.result(timeout=18)
             last = getattr(turn, "last_tool_result", None) or {}
             items = last.get("items") or []
             total = last.get("total") or last.get("count") or len(items)
@@ -113,15 +112,18 @@ def chat(req: ChatRequest) -> Dict[str, Any]:
                     "providers_used": last.get("providers_used"),
                 },
             }
-        except Exception as e:
-            # fall through to aggregator
+        except FuturesTimeout:
+            # timed out — fall through to aggregator
+            pass
+        except Exception:
+            # any agent error — fall through to aggregator
             pass
 
-    # 3) Fallback: call aggregator directly so Chat is still useful.
+    # 3) Fallback: direct aggregator search (fast & reliable)
     if not _agg_sync:
         return {
             "ok": True,
-            "answer": "Tell me a city (e.g., 'in Vilnius') and optionally a country code (e.g., 'country: LT'), plus keywords.",
+            "answer": "Tell me a city (e.g., 'in Vilnius') and optionally 'country: LT', plus keywords.",
             "debug": {"agent": "fallback", "reason": "aggregator_unavailable"},
         }
 
@@ -149,16 +151,12 @@ def chat(req: ChatRequest) -> Dict[str, Any]:
         },
     }
 
-
 @router.get("/digest/{user_id}")
 def get_digest(user_id: str) -> Dict[str, Any]:
-    # placeholder until you wire a scheduler
     return {"ok": True, "digest": None, "debug": {"scheduler": "not_configured"}}
-
 
 @router.post("/subscribe")
 def subscribe(req: SubscribeRequest) -> Dict[str, Any]:
-    # placeholder until you wire a scheduler
     return {
         "ok": True,
         "subscribed": False,
