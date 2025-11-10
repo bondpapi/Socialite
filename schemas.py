@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 from datetime import date, datetime
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from __future__ import annotations
 
 class UserCreate(BaseModel):
     name: str
