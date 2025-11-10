@@ -136,23 +136,29 @@ class TicketmasterProvider:
 
         return items
 
-def search(
+
+async def search(
     *,
     city: str,
     country: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     query: Optional[str] = None,
-):
+    # keep for compatibility
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
     try:
         from config import settings
         api_key = getattr(settings, "ticketmaster_api_key", None) or getattr(settings, "TICKETMASTER_API_KEY", None)
     except Exception:
         api_key = None
 
-    now = datetime.now(timezone.utc)
-    start = (start or now.replace(hour=0, minute=0, second=0, microsecond=0))
-    end = (end or (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0))
+    if start is None or end is None:
+        now = datetime.now(timezone.utc)
+        start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
 
     provider = TicketmasterProvider(api_key)
-    return provider.search(city=city, country=country, start=start, end=end, query=query)
+    return await provider.search(city=city, country=country, start=start, end=end, query=query)
+

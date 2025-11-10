@@ -121,23 +121,28 @@ class EventbriteProvider:
 
         return items
 
-def search(
+
+async def search(
     *,
     city: str,
     country: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     query: Optional[str] = None,
-):
+    # keep these for compatibility; aggregator won’t pass them
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
     try:
         from config import settings
         token = getattr(settings, "eventbrite_token", None) or getattr(settings, "EVENTBRITE_TOKEN", None)
     except Exception:
         token = None
 
-    now = datetime.now(timezone.utc)
-    start = (start or now.replace(hour=0, minute=0, second=0, microsecond=0))
-    end = (end or (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0))
+    if start is None or end is None:
+        now = datetime.now(timezone.utc)
+        start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
 
     provider = EventbriteProvider(token)
-    return provider.search(city=city, country=country, start=start, end=end, query=query)
+    return await provider.search(city=city, country=country, start=start, end=end, query=query)

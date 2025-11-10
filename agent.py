@@ -81,7 +81,7 @@ TOOLS = [
     },
 ]
 
-# ---- capture last tool result so the API can return items ----
+
 _LAST_TOOL_RESULT: Dict[str, Any] = {}
 
 def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,7 +162,7 @@ def run_agent(user_id: str, message: str, model: str = "gpt-4o-mini") -> AgentTu
     used_tools: List[str] = []
     msg = resp.choices[0].message
 
-    # Tool loop
+    
     while getattr(msg, "tool_calls", None):
         for call in msg.tool_calls:
             name = call.function.name
