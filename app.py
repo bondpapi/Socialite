@@ -96,7 +96,14 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
 
 def event_card(e: Dict[str, Any], key: str, user_id: str):
     with st.container():
-        st.markdown(f"### {e.get('title') or 'Untitled'}")
+        title = e.get("title") or "Untitled"
+        desc = e.get("description")
+        img = e.get("image_url")
+        price = e.get("min_price")
+        curr = e.get("currency")
+
+        st.markdown(f"### {title}")
+
         chips = []
         if e.get("venue_name"):
             chips.append(e["venue_name"])
@@ -108,20 +115,31 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
             chips.append(e["start_time"])
         if e.get("category"):
             chips.append(f"• {e['category']}")
-        st.caption(" · ".join(chips))
+        if chips:
+            st.caption(" · ".join(chips))
+
+        if img:
+            try:
+                st.image(img, use_column_width=True)
+            except Exception:
+                pass
+
+        if desc and desc != "Event":
+            # Many sites put "Event" or boilerplate—skip that
+            st.write(desc)
 
         c1, c2, c3 = st.columns(3)
         with c1:
             if e.get("url"):
+                # simple compatible link
                 st.markdown(f"[Open]({e['url']})")
         with c2:
             if st.button("Save", key=f"save_{key}"):
                 _post("/saved", {"user_id": user_id, "event": e})
                 st.success("Saved ✅")
         with c3:
-            mp = e.get("min_price")
-            if mp is not None:
-                st.write(f"From {mp} {e.get('currency') or ''}".strip())
+            if price is not None:
+                st.write(f"From {price} {curr or ''}".strip())
 
 
 # =========================
@@ -245,11 +263,21 @@ with tab_chat:
             "city": prof.get("city"),
             "country": prof.get("country"),
         }
-        res = _post("/agent/chat", payload)
+        with st.spinner("Thinking…"):
+            # longer timeout for agent
+            res = _post("/agent/chat", payload, timeout=60)
+
         if res.get("ok") is False and res.get("error"):
             st.error(f"Agent error: {res['error']}")
         else:
             st.write(res.get("answer") or res)
+            
+            items = res.get("items") or []
+            if items:
+                st.markdown("#### Picks")
+                for i, ev in enumerate(items[:10]):
+                    event_card(
+                        ev, key=f"chat_{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
 
     st.divider()
     st.subheader("Subscriptions")
