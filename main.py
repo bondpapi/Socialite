@@ -1,4 +1,5 @@
 from __future__ import annotations
+from asyncio.log import logger
 from time import time
 
 from fastapi import FastAPI
@@ -27,6 +28,16 @@ app.add_middleware(
 
 # Metrics
 app.add_middleware(MetricsMiddleware)
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    dur = int((time.time() - start) * 1000)
+    logger.info("path=%s status=%s dur_ms=%s ua=%s",
+                request.url.path, response.status_code, dur,
+                request.headers.get("user-agent","-"))
+    return response
 
 # Routers
 app.include_router(events_router.router)
