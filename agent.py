@@ -1,4 +1,3 @@
-# agent.py (root)
 from __future__ import annotations
 
 import json

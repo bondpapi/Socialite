@@ -1,4 +1,5 @@
 from __future__ import annotations
+from time import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +37,10 @@ app.include_router(auth_router.router)
 app.include_router(profile_router.router)
 
 # Health (Render warmup hits this)
+@app.get("/ping")
+def ping():
+    return {"ok": True, "ts": time.time()}
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
