@@ -1,6 +1,6 @@
 from __future__ import annotations
 from asyncio.log import logger
-from time import time
+import time as _t
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,9 +31,9 @@ app.add_middleware(MetricsMiddleware)
 
 @app.middleware("http")
 async def log_requests(request, call_next):
-    start = time.time()
+    start = _t.time()
     response = await call_next(request)
-    dur = int((time.time() - start) * 1000)
+    dur = int((_t.time() - start) * 1000)
     logger.info("path=%s status=%s dur_ms=%s ua=%s",
                 request.url.path, response.status_code, dur,
                 request.headers.get("user-agent","-"))
@@ -50,7 +50,7 @@ app.include_router(profile_router.router)
 # Health (Render warmup hits this)
 @app.get("/ping")
 def ping():
-    return {"ok": True, "ts": time.time()}
+    return {"ok": True, "ts": _t.time()}
 
 @app.get("/health")
 def health():
