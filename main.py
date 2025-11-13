@@ -1,8 +1,9 @@
 from __future__ import annotations
-from asyncio.log import logger
+
+import logging
 import time as _t
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from middleware import MetricsMiddleware
@@ -29,15 +30,26 @@ app.add_middleware(
 # Metrics
 app.add_middleware(MetricsMiddleware)
 
+# Use uvicorn/error logger so messages show in Render logs
+_log = logging.getLogger("uvicorn.error")
+
 @app.middleware("http")
-async def log_requests(request, call_next):
-    start = _t.time()
-    response = await call_next(request)
-    dur = int((_t.time() - start) * 1000)
-    logger.info("path=%s status=%s dur_ms=%s ua=%s",
-                request.url.path, response.status_code, dur,
-                request.headers.get("user-agent","-"))
-    return response
+async def log_requests(request: Request, call_next):
+    start = _t.perf_counter()  # monotonic for durations
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        dur_ms = int((_t.perf_counter() - start) * 1000)
+        status = getattr(response, "status_code", "-")
+        _log.info(
+            "path=%s status=%s dur_ms=%s ua=%s",
+            request.url.path,
+            status,
+            dur_ms,
+            request.headers.get("user-agent", "-"),
+        )
 
 # Routers
 app.include_router(events_router.router)
