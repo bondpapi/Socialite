@@ -1,167 +1,187 @@
 from __future__ import annotations
 
-import re
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..services.aggregator import search_events_sync
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
+# Try to import agent services
 _services_agent = None
 _root_agent = None
+
 try:
-    from services import agent as _services_agent
+    from ..services.agent import chat_with_agent
+    _services_agent = chat_with_agent
 except Exception:
     _services_agent = None
 
 try:
-    import agent as _root_agent
+    from ..services.root_agent import RootAgent
+    _root_agent = RootAgent()
 except Exception:
     _root_agent = None
 
-_agg_sync = None
-try:
-    from services.aggregator import search_events_sync as _agg_sync
-except Exception:
-    _agg_sync = None
+# ---------- Models ----------
 
 
 class ChatRequest(BaseModel):
     user_id: str
-    message: str
     username: Optional[str] = None
+    message: str
     city: Optional[str] = None
     country: Optional[str] = None
-    days_ahead: int = 120
-    start_in_days: int = 0
-    include_mock: bool = False
-    limit: int = 30
-    offset: int = 0
+
+
+class ChatResponse(BaseModel):
+    ok: bool = True
+    answer: str
+    items: List[Dict[str, Any]] = []
+    debug: Dict[str, Any] = {}
+
 
 class SubscribeRequest(BaseModel):
     user_id: str
-    city: str
-    country: str
-    cadence: str = "WEEKLY"
-    keywords: Optional[List[str]] = None
+    city: Optional[str] = None
+    country: Optional[str] = None
+    cadence: str = "WEEKLY"  # WEEKLY, DAILY
+    keywords: List[str] = []
 
 
-_CITY_HINT = re.compile(r"\b(?:in|around|near)\s+([A-Za-zÀ-ž\-\.'\s]{2,})\b", re.I)
-_COUNTRY_ISO2 = re.compile(r"\b(?:country|cc)\s*[:=]\s*([A-Za-z]{2})\b", re.I)
+class DigestResponse(BaseModel):
+    digest: List[Dict[str, Any]] = []
+    generated_at: Optional[str] = None
 
-def _infer_city_country(message: str, fallback_city: Optional[str], fallback_country: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    city = fallback_city
-    m = _CITY_HINT.search(message or "")
-    if m:
-        city = m.group(1).strip(" .,")
-    country = (fallback_country or "")
-    m2 = _COUNTRY_ISO2.search(message or "")
-    if m2:
-        country = m2.group(1).upper()
-    return (city, country or None)
+# ---------- Fallback agent ----------
 
-def _short_answer(city: Optional[str], country: Optional[str], total: int) -> str:
-    loc = ", ".join([p for p in [city, country] if p])
-    loc = f" in {loc}" if loc else ""
-    noun = "event" if total == 1 else "events"
-    return f"I found {total} {noun}{loc}. Here are some picks."
 
-_EXEC = ThreadPoolExecutor(max_workers=1)
+def _fallback_agent(req: ChatRequest) -> ChatResponse:
+    """Simple fallback when no LLM agent is available."""
+    msg = req.message.lower()
 
-@router.post("/chat")
-def chat(req: ChatRequest) -> Dict[str, Any]:
-    """
-    Try a real agent (services.agent or root agent) with a hard timeout.
-    On timeout/error, fall back to aggregator so the UI never waits > ~18s.
-    """
-    # 1) If you later add services.agent.chat(), prefer it
-    if _services_agent and hasattr(_services_agent, "chat"):
+    # Simple keyword matching
+    if any(word in msg for word in ["event", "concert", "show", "music", "sports"]):
+        city = req.city or "Vilnius"
+        country = req.country or "LT"
+
         try:
-            fut = _EXEC.submit(_services_agent.chat,
-                               user_id=req.user_id,
-                               message=req.message,
-                               username=req.username,
-                               city=req.city,
-                               country=req.country)
-            result = fut.result(timeout=18)
-            return result
-        except FuturesTimeout:
-            pass
+            result = search_events_sync(
+                city=city,
+                country=country,
+                days_ahead=30,
+                start_in_days=0,
+                include_mock=True
+            )
+
+            items = result.get("items", [])[:5]  # Take first 5
+            count = len(items)
+
+            if count > 0:
+                answer = f"I found {count} events in {city}. Here are some options:"
+            else:
+                answer = f"I couldn't find any events in {city} right now. Try widening your search or check back later."
+
+            return ChatResponse(
+                answer=answer,
+                items=items,
+                debug={"fallback": True, "search_params": {
+                    "city": city, "country": country}}
+            )
         except Exception as e:
-            # continue to fallback
-            pass
+            return ChatResponse(
+                answer="I'm having trouble searching for events right now. Please try again later.",
+                debug={"fallback": True, "error": str(e)}
+            )
 
-    # 2) Root agent with timeout
-    if _root_agent and hasattr(_root_agent, "run_agent"):
-        try:
-            fut = _EXEC.submit(_root_agent.run_agent, req.user_id, req.message)
-            turn = fut.result(timeout=18)
-            last = getattr(turn, "last_tool_result", None) or {}
-            items = last.get("items") or []
-            total = last.get("total") or last.get("count") or len(items)
-            return {
-                "ok": True,
-                "answer": turn.reply,
-                "items": items,
-                "debug": {
-                    "agent": "root_agent",
-                    "used_tools": getattr(turn, "used_tools", []),
-                    "provider_errors": (last.get("debug") or {}).get("provider_errors"),
-                    "providers_used": last.get("providers_used"),
-                },
-            }
-        except FuturesTimeout:
-            # timed out — fall through to aggregator
-            pass
-        except Exception:
-            # any agent error — fall through to aggregator
-            pass
-
-    # 3) Fallback: direct aggregator search (fast & reliable)
-    if not _agg_sync:
-        return {
-            "ok": True,
-            "answer": "Tell me a city (e.g., 'in Vilnius') and optionally 'country: LT', plus keywords.",
-            "debug": {"agent": "fallback", "reason": "aggregator_unavailable"},
-        }
-
-    city, country = _infer_city_country(req.message, req.city, req.country)
-    payload = _agg_sync(
-        city=city or (req.city or ""),
-        country=(country or req.country or "LT"),
-        days_ahead=req.days_ahead,
-        start_in_days=req.start_in_days,
-        include_mock=req.include_mock,
-        query=req.message,
-        limit=req.limit,
-        offset=req.offset,
+    # Generic response
+    return ChatResponse(
+        answer="I can help you find events and activities! Try asking about concerts, shows, or sports in your city.",
+        debug={"fallback": True, "generic": True}
     )
-    total = int(payload.get("total") or payload.get("count") or 0)
-    return {
-        "ok": True,
-        "answer": _short_answer(city, country, total),
-        "items": payload.get("items") or [],
-        "debug": {
-            "agent": "fallback_search",
-            "providers_used": payload.get("providers_used"),
-            "provider_errors": (payload.get("debug") or {}).get("provider_errors"),
-            "window": (payload.get("debug") or {}).get("window"),
-        },
-    }
 
-@router.get("/digest/{user_id}")
-def get_digest(user_id: str) -> Dict[str, Any]:
-    return {"ok": True, "digest": None, "debug": {"scheduler": "not_configured"}}
+# ---------- Routes ----------
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    """
+    Chat with the Socialite agent. Falls back gracefully if no LLM agent is available.
+    """
+    try:
+        # Try root agent first
+        if _root_agent:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_root_agent.chat, req.dict())
+                try:
+                    result = future.result(timeout=30)
+                    return ChatResponse(**result)
+                except FuturesTimeout:
+                    return ChatResponse(
+                        answer="The agent took too long to respond. Please try a simpler question.",
+                        debug={"timeout": True}
+                    )
+
+        # Try services agent
+        elif _services_agent:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    _services_agent, req.message, req.user_id)
+                try:
+                    result = future.result(timeout=30)
+                    return ChatResponse(answer=result, debug={"services_agent": True})
+                except FuturesTimeout:
+                    return ChatResponse(
+                        answer="The agent took too long to respond. Please try again.",
+                        debug={"timeout": True}
+                    )
+
+        # Fallback to simple agent
+        else:
+            return _fallback_agent(req)
+
+    except Exception as e:
+        # Always fall back to simple agent on any error
+        return _fallback_agent(req)
+
 
 @router.post("/subscribe")
-def subscribe(req: SubscribeRequest) -> Dict[str, Any]:
+async def subscribe(req: SubscribeRequest) -> Dict[str, Any]:
+    """
+    Subscribe to event digests. Currently returns a placeholder response.
+    """
     return {
         "ok": True,
-        "subscribed": False,
-        "debug": {"scheduler": "not_configured"},
-        "hint": "Scheduler not enabled on server; request accepted but not scheduled.",
+        "hint": "Subscriptions are not yet implemented. Check back later!",
+        "user_id": req.user_id,
+        "cadence": req.cadence
     }
 
+
+@router.get("/digest/{user_id}", response_model=DigestResponse)
+async def get_digest(user_id: str) -> DigestResponse:
+    """
+    Get the latest digest for a user. Currently returns placeholder data.
+    """
+    return DigestResponse(
+        digest=[
+            {"title": "Sample Event",
+                "note": "This is a placeholder digest. Real digests coming soon!"}
+        ],
+        generated_at="2024-01-01T00:00:00Z"
+    )
+
+
+@router.get("/status")
+async def agent_status() -> Dict[str, Any]:
+    """
+    Get the status of available agent services.
+    """
+    return {
+        "services_agent_available": _services_agent is not None,
+        "root_agent_available": _root_agent is not None,
+        "fallback_enabled": True,
+    }
