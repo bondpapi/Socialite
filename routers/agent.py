@@ -164,3 +164,4 @@ def subscribe(req: SubscribeRequest) -> Dict[str, Any]:
         "debug": {"scheduler": "not_configured"},
         "hint": "Scheduler not enabled on server; request accepted but not scheduled.",
     }
+

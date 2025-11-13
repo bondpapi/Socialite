@@ -1,14 +1,16 @@
 import os
+import time
 from typing import Dict, Any, List
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import streamlit as st
 
 # =========================
 # Config
 # =========================
-API = os.getenv("SOCIALITE_API",
-                "https://socialite-7wkx.onrender.com").rstrip("/")
+API = os.getenv("SOCIALITE_API", "https://socialite-7wkx.onrender.com").rstrip("/")
 
 st.set_page_config(page_title="Socialite", page_icon="🎟️", layout="wide")
 st.title("Socialite")
@@ -21,56 +23,62 @@ if "username" not in st.session_state:
     st.session_state.username = "demo"
 
 # =========================
-# HTTP helpers
+# HTTP helpers (with retries + sidebar diagnostics)
 # =========================
+_session = requests.Session()
+_retry = Retry(
+    total=3, connect=3, read=3, backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    respect_retry_after_header=True,
+)
+_session.mount("https://", HTTPAdapter(max_retries=_retry))
+_session.mount("http://", HTTPAdapter(max_retries=_retry))
 
+def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs):
+    url = f"{API}{path}"
+    t0 = time.time()
+    try:
+        r = _session.request(method, url, timeout=timeout, **kwargs)
+        elapsed = round((time.time() - t0) * 1000)
+        st.sidebar.write(f"{method} {url} → {r.status_code} ({elapsed} ms)")
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        elapsed = round((time.time() - t0) * 1000)
+        st.sidebar.error(f"{method} {url} failed ({elapsed} ms): {e}")
+        return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
 
 def _get(path: str, **params) -> Dict[str, Any] | List[Dict[str, Any]]:
-    try:
-        r = requests.get(f"{API}{path}", params=params, timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
+    return _req_json("GET", path, params=params)
 
 def _post(path: str, payload: Dict[str, Any], *, timeout: int = 30) -> Dict[str, Any]:
-    try:
-        r = requests.post(f"{API}{path}", json=payload, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
+    return _req_json("POST", path, timeout=timeout, json=payload)
 
 def _delete(path: str) -> Dict[str, Any]:
-    try:
-        r = requests.delete(f"{API}{path}", timeout=20)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return _req_json("DELETE", path)
+
+# Simple connectivity box (now that helpers exist)
+with st.sidebar.expander("Connectivity"):
+    st.caption(f"API base: `{API}`")
+    st.json(_get("/ping"))
 
 # =========================
 # Profile helpers
 # =========================
-
-
 def load_profile(uid: str) -> Dict[str, Any]:
     res = _get(f"/profile/{uid}")
     if isinstance(res, dict) and res.get("profile"):
         return res["profile"]
     return {"user_id": uid, "username": st.session_state.username}
 
-
 def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
     return _post("/profile", p)
-
 
 def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
     city = (p.get("city") or "").strip().title()
     country = (p.get("country") or "").strip().upper()[:2]
 
+    # Guard against 422s from blank city/country
     if not city or not country:
         return {
             "count": 0,
@@ -92,8 +100,6 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
 # =========================
 # UI bits
 # =========================
-
-
 def event_card(e: Dict[str, Any], key: str, user_id: str):
     with st.container():
         title = e.get("title") or "Untitled"
@@ -105,16 +111,11 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
         st.markdown(f"### {title}")
 
         chips = []
-        if e.get("venue_name"):
-            chips.append(e["venue_name"])
-        if e.get("city"):
-            chips.append(e["city"])
-        if e.get("country"):
-            chips.append(e["country"])
-        if e.get("start_time"):
-            chips.append(e["start_time"])
-        if e.get("category"):
-            chips.append(f"• {e['category']}")
+        if e.get("venue_name"): chips.append(e["venue_name"])
+        if e.get("city"): chips.append(e["city"])
+        if e.get("country"): chips.append(e["country"])
+        if e.get("start_time"): chips.append(e["start_time"])
+        if e.get("category"): chips.append(f"• {e['category']}")
         if chips:
             st.caption(" · ".join(chips))
 
@@ -125,13 +126,11 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
                 pass
 
         if desc and desc != "Event":
-            # Many sites put "Event" or boilerplate—skip that
             st.write(desc)
 
         c1, c2, c3 = st.columns(3)
         with c1:
             if e.get("url"):
-                # simple compatible link
                 st.markdown(f"[Open]({e['url']})")
         with c2:
             if st.button("Save", key=f"save_{key}"):
@@ -141,12 +140,10 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
             if price is not None:
                 st.write(f"From {price} {curr or ''}".strip())
 
-
 # =========================
 # Tabs
 # =========================
-tab_discover, tab_chat, tab_settings = st.tabs(
-    ["Discover", "Chat 🤖", "Settings"])
+tab_discover, tab_chat, tab_settings = st.tabs(["Discover", "Chat 🤖", "Settings"])
 
 # ---------- SETTINGS ----------
 with tab_settings:
@@ -157,23 +154,16 @@ with tab_settings:
 
     col1, col2 = st.columns(2)
     with col1:
-        username = st.text_input("Username", prof.get(
-            "username") or st.session_state.username)
-        user_id = st.text_input("User ID", prof.get(
-            "user_id") or st.session_state.user_id)
-        city = st.text_input("Home city", prof.get("city") or "Vilnius")
-        country = st.text_input(
-            "Country (ISO-2)", (prof.get("country") or "LT")[:2])
+        username = st.text_input("Username", prof.get("username") or st.session_state.username)
+        user_id  = st.text_input("User ID", prof.get("user_id") or st.session_state.user_id)
+        city     = st.text_input("Home city", prof.get("city") or "Vilnius")
+        country  = st.text_input("Country (ISO-2)", (prof.get("country") or "LT")[:2])
     with col2:
-        days_ahead = st.number_input(
-            "Days ahead", 1, 365, int(prof.get("days_ahead") or 120))
-        start_in_days = st.number_input(
-            "Start in (days)", 0, 365, int(prof.get("start_in_days") or 0))
-        keywords = st.text_input(
-            "Keywords (comma-sep)", prof.get("keywords") or "")
-        passions_raw = st.text_input(
-            "Passions / interests (comma-sep)", ", ".join(prof.get("passions") or []))
-        include_mock = st.checkbox("Include mock data (for testing)", False)
+        days_ahead    = st.number_input("Days ahead", 1, 365, int(prof.get("days_ahead") or 120))
+        start_in_days = st.number_input("Start in (days)", 0, 365, int(prof.get("start_in_days") or 0))
+        keywords      = st.text_input("Keywords (comma-sep)", prof.get("keywords") or "")
+        passions_raw  = st.text_input("Passions / interests (comma-sep)", ", ".join(prof.get("passions") or []))
+        include_mock  = st.checkbox("Include mock data (for testing)", False)
 
     if st.button("Save settings", type="primary"):
         passions = [p.strip() for p in passions_raw.split(",") if p.strip()]
@@ -211,14 +201,12 @@ with tab_discover:
         prof = load_profile(st.session_state.user_id)
 
         if not (prof.get("city") and prof.get("country")):
-            st.info(
-                "Set your **Home city** and **Country** in Settings, then click Refresh.")
+            st.info("Set your **Home city** and **Country** in Settings, then click Refresh.")
         else:
             res = search_from_profile(prof, include_mock_feed)
 
             if res.get("count", 0) == 0:
-                st.info(
-                    "No events matched your Settings. Try widening the date window or clearing keywords.")
+                st.info("No events matched your Settings. Try widening the date window or clearing keywords.")
                 dbg = res.get("debug")
                 if dbg:
                     with st.expander("Diagnostics"):
@@ -232,28 +220,23 @@ with tab_discover:
                     c = (ev.get("category") or "").lower()
                     s = 0
                     for p in passions:
-                        if p in t:
-                            s += 2
-                        if p in c:
-                            s += 1
+                        if p in t: s += 2
+                        if p in c: s += 1
                     return -s
 
                 items.sort(key=score)
                 for i, ev in enumerate(items):
-                    event_card(
-                        ev, key=f"{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
+                    event_card(ev, key=f"{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
 
     st.divider()
     st.caption("Tip: update Settings and click Refresh.")
-
 
 # ---------- CHAT ----------
 with tab_chat:
     st.header("Chat with Socialite 🤖")
     st.caption("Ask for plans or specifics; the agent reads your Settings.")
 
-    message = st.text_input(
-        "Message", placeholder="e.g., live music next weekend in my city")
+    message = st.text_input("Message", placeholder="e.g., live music next weekend in my city")
     if st.button("Send", type="primary"):
         prof = load_profile(st.session_state.user_id)
         payload = {
@@ -271,13 +254,11 @@ with tab_chat:
             st.error(f"Agent error: {res['error']}")
         else:
             st.write(res.get("answer") or res)
-            
             items = res.get("items") or []
             if items:
                 st.markdown("#### Picks")
                 for i, ev in enumerate(items[:10]):
-                    event_card(
-                        ev, key=f"chat_{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
+                    event_card(ev, key=f"chat_{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
 
     st.divider()
     st.subheader("Subscriptions")
@@ -296,8 +277,7 @@ with tab_chat:
             if res.get("ok"):
                 st.success("Subscribed ✅")
             else:
-                st.warning(res.get("hint") or res.get("error")
-                           or "Subscription not configured")
+                st.warning(res.get("hint") or res.get("error") or "Subscription not configured")
     with colB:
         if st.button("Fetch latest digest now"):
             res = _get(f"/agent/digest/{st.session_state.user_id}")
