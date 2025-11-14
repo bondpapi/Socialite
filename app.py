@@ -34,260 +34,432 @@ _retry = Retry(
 _session.mount("https://", HTTPAdapter(max_retries=_retry))
 _session.mount("http://", HTTPAdapter(max_retries=_retry))
 
+
 def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs):
     url = f"{API}{path}"
     t0 = time.time()
     try:
         r = _session.request(method, url, timeout=timeout, **kwargs)
         elapsed = round((time.time() - t0) * 1000)
-        st.sidebar.write(f"{method} {url} → {r.status_code} ({elapsed} ms)")
+        if st.sidebar:
+            st.sidebar.caption(
+                f"{method} {path} → {r.status_code} ({elapsed}ms)")
         r.raise_for_status()
         return r.json()
     except Exception as e:
         elapsed = round((time.time() - t0) * 1000)
-        st.sidebar.error(f"{method} {url} failed ({elapsed} ms): {e}")
+        if st.sidebar:
+            st.sidebar.error(
+                f"{method} {path} failed ({elapsed}ms): {str(e)[:50]}")
         return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
 
-def _get(path: str, **params) -> Dict[str, Any] | List[Dict[str, Any]]:
+
+def _get(path: str, **params) -> Dict[str, Any]:
     return _req_json("GET", path, params=params)
+
 
 def _post(path: str, payload: Dict[str, Any], *, timeout: int = 30) -> Dict[str, Any]:
     return _req_json("POST", path, timeout=timeout, json=payload)
 
+
 def _delete(path: str) -> Dict[str, Any]:
     return _req_json("DELETE", path)
 
-# Simple connectivity box (now that helpers exist)
-with st.sidebar.expander("Connectivity"):
-    st.caption(f"API base: `{API}`")
-    st.json(_get("/ping"))
+
+# Simple connectivity check
+with st.sidebar.expander("API Status", expanded=False):
+    st.caption(f"Base: `{API}`")
+    ping_result = _get("/")
+    if ping_result.get("ok"):
+        st.success("Connected ✅")
+    else:
+        st.error("Connection failed")
+        st.json(ping_result)
 
 # =========================
 # Profile helpers
 # =========================
+
+
 def load_profile(uid: str) -> Dict[str, Any]:
     res = _get(f"/profile/{uid}")
-    if isinstance(res, dict) and res.get("profile"):
+    if isinstance(res, dict) and "profile" in res:
         return res["profile"]
     return {"user_id": uid, "username": st.session_state.username}
 
+
 def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    return _post("/profile", p)
+    return _post(f"/profile/{p.get('user_id', 'demo-user')}", p)
+
 
 def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
-    city = (p.get("city") or "").strip().title()
-    country = (p.get("country") or "").strip().upper()[:2]
+    city = (p.get("city") or "").strip()
+    country = (p.get("country") or "").strip().upper()
 
-    # Guard against 422s from blank city/country
-    if not city or not country:
+    if not city or len(country) != 2:
         return {
             "count": 0,
             "items": [],
-            "debug": {"reason": "missing_city_or_country", "city": city, "country": country},
+            "debug": {"reason": "invalid_location", "city": city, "country": country},
         }
 
-    days_ahead = int(p.get("days_ahead") or 120)
-    start_in_days = int(p.get("start_in_days") or 0)
-    query = (p.get("keywords") or None)
+    params = {
+        "city": city,
+        "country": country,
+        "days_ahead": int(p.get("days_ahead", 120)),
+        "start_in_days": int(p.get("start_in_days", 0)),
+        "include_mock": include_mock,
+    }
 
-    return _get(
-        "/events/search",
-        city=city, country=country,
-        days_ahead=days_ahead, start_in_days=start_in_days,
-        include_mock=bool(include_mock), query=query
-    ) or {"count": 0, "items": [], "debug": {"errors": ["no response"]}}
+    if p.get("keywords"):
+        params["query"] = p["keywords"]
+
+    result = _get("/events/search", **params)
+    return result if isinstance(result, dict) else {"count": 0, "items": []}
 
 # =========================
-# UI bits
+# UI components
 # =========================
+
+
 def event_card(e: Dict[str, Any], key: str, user_id: str):
     with st.container():
-        title = e.get("title") or "Untitled"
-        desc = e.get("description")
-        img = e.get("image_url")
-        price = e.get("min_price")
-        curr = e.get("currency")
-
+        title = e.get("title", "Untitled Event")
         st.markdown(f"### {title}")
 
-        chips = []
-        if e.get("venue_name"): chips.append(e["venue_name"])
-        if e.get("city"): chips.append(e["city"])
-        if e.get("country"): chips.append(e["country"])
-        if e.get("start_time"): chips.append(e["start_time"])
-        if e.get("category"): chips.append(f"• {e['category']}")
-        if chips:
-            st.caption(" · ".join(chips))
+        # Event details
+        details = []
+        if e.get("venue_name"):
+            details.append(f"📍 {e['venue_name']}")
+        if e.get("city") and e.get("country"):
+            details.append(f"{e['city']}, {e['country']}")
+        if e.get("start_time"):
+            details.append(f"🕐 {e['start_time']}")
+        if e.get("category"):
+            details.append(f"🏷️ {e['category']}")
 
-        if img:
+        if details:
+            st.caption(" • ".join(details))
+
+        # Description
+        desc = e.get("description")
+        if desc and desc != "Event" and len(desc) > 10:
+            st.text(desc[:200] + "..." if len(desc) > 200 else desc)
+
+        # Image
+        if e.get("image_url"):
             try:
-                st.image(img, use_column_width=True)
+                st.image(e["image_url"], use_column_width=True)
             except Exception:
                 pass
 
-        if desc and desc != "Event":
-            st.write(desc)
+        # Action buttons
+        col1, col2, col3 = st.columns([2, 1, 1])
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        with col1:
             if e.get("url"):
-                st.markdown(f"[Open]({e['url']})")
-        with c2:
-            if st.button("Save", key=f"save_{key}"):
-                _post("/saved", {"user_id": user_id, "event": e})
-                st.success("Saved ✅")
-        with c3:
+                st.markdown(f"[🔗 View Details]({e['url']})")
+
+        with col2:
+            if st.button("💾 Save", key=f"save_{key}"):
+                save_result = _post("/saved", {"user_id": user_id, "event": e})
+                if save_result.get("ok"):
+                    st.success("Saved!")
+                else:
+                    st.error("Save failed")
+
+        with col3:
+            price = e.get("min_price")
             if price is not None:
-                st.write(f"From {price} {curr or ''}".strip())
+                currency = e.get("currency", "")
+                st.write(f"💰 From {price} {currency}".strip())
+
+        st.divider()
+
 
 # =========================
-# Tabs
+# Main App
 # =========================
-tab_discover, tab_chat, tab_settings = st.tabs(["Discover", "Chat 🤖", "Settings"])
+tabs = st.tabs(["🏠 Discover", "💬 Chat", "⚙️ Settings"])
 
-# ---------- SETTINGS ----------
-with tab_settings:
-    st.header("Settings")
-    st.caption("These preferences power Discover and personalize Chat.")
+# ---------- SETTINGS TAB ----------
+with tabs[2]:
+    st.header("⚙️ Settings")
+    st.caption("Configure your preferences for personalized recommendations.")
 
-    prof = load_profile(st.session_state.user_id)
+    # Load current profile
+    profile = load_profile(st.session_state.user_id)
 
-    col1, col2 = st.columns(2)
+    # Settings form
+    with st.form("settings_form"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Account")
+            username = st.text_input(
+                "Username",
+                value=profile.get("username", st.session_state.username)
+            )
+            user_id = st.text_input(
+                "User ID",
+                value=profile.get("user_id", st.session_state.user_id)
+            )
+
+        with col2:
+            st.subheader("Location")
+            city = st.text_input(
+                "Home City",
+                value=profile.get("city", "Vilnius"),
+                help="Your home city for event recommendations"
+            )
+            country = st.text_input(
+                "Country Code",
+                value=profile.get("country", "LT"),
+                max_chars=2,
+                help="ISO-2 country code (e.g., LT, US, GB)"
+            ).upper()
+
+        col3, col4 = st.columns(2)
+
+        with col3:
+            st.subheader("Search Preferences")
+            days_ahead = st.slider(
+                "Days ahead to search",
+                min_value=7,
+                max_value=365,
+                value=int(profile.get("days_ahead", 120))
+            )
+            start_in_days = st.slider(
+                "Start search in X days",
+                min_value=0,
+                max_value=30,
+                value=int(profile.get("start_in_days", 0))
+            )
+
+        with col4:
+            st.subheader("Interests")
+            keywords = st.text_input(
+                "Search Keywords",
+                value=profile.get("keywords", ""),
+                help="Comma-separated keywords (e.g., music, sports, theater)"
+            )
+            passions_text = st.text_area(
+                "Interests/Passions",
+                value=", ".join(profile.get("passions", [])),
+                help="Your interests for better recommendations"
+            )
+
+        # Advanced options
+        with st.expander("Advanced Options"):
+            include_mock = st.checkbox(
+                "Include mock data (for testing)",
+                value=False
+            )
+
+        # Submit button
+        if st.form_submit_button("💾 Save Settings", type="primary"):
+            # Parse passions
+            passions = [p.strip()
+                        for p in passions_text.split(",") if p.strip()]
+
+            # Build profile payload
+            new_profile = {
+                "user_id": user_id,
+                "username": username,
+                "city": city.strip(),
+                "country": country.strip(),
+                "days_ahead": days_ahead,
+                "start_in_days": start_in_days,
+                "keywords": keywords.strip() or None,
+                "passions": passions,
+            }
+
+            # Save profile
+            result = save_profile(new_profile)
+
+            if result.get("ok"):
+                st.success("✅ Settings saved successfully!")
+                # Update session state
+                st.session_state.user_id = user_id
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error(
+                    f"❌ Failed to save: {result.get('error', 'Unknown error')}")
+
+# ---------- DISCOVER TAB ----------
+with tabs[0]:
+    st.header("🏠 Discover Events")
+
+    # Load profile for search
+    profile = load_profile(st.session_state.user_id)
+
+    # Search controls
+    col1, col2 = st.columns([1, 3])
+
     with col1:
-        username = st.text_input("Username", prof.get("username") or st.session_state.username)
-        user_id  = st.text_input("User ID", prof.get("user_id") or st.session_state.user_id)
-        city     = st.text_input("Home city", prof.get("city") or "Vilnius")
-        country  = st.text_input("Country (ISO-2)", (prof.get("country") or "LT")[:2])
-    with col2:
-        days_ahead    = st.number_input("Days ahead", 1, 365, int(prof.get("days_ahead") or 120))
-        start_in_days = st.number_input("Start in (days)", 0, 365, int(prof.get("start_in_days") or 0))
-        keywords      = st.text_input("Keywords (comma-sep)", prof.get("keywords") or "")
-        passions_raw  = st.text_input("Passions / interests (comma-sep)", ", ".join(prof.get("passions") or []))
-        include_mock  = st.checkbox("Include mock data (for testing)", False)
+        st.subheader("🎛️ Controls")
+        st.caption("Based on your Settings")
 
-    if st.button("Save settings", type="primary"):
-        passions = [p.strip() for p in passions_raw.split(",") if p.strip()]
-        payload = {
-            "user_id": user_id,
-            "username": username,
-            "city": city.strip().title(),
-            "country": country.strip().upper()[:2],
-            "days_ahead": int(days_ahead),
-            "start_in_days": int(start_in_days),
-            "keywords": keywords.strip() or None,
-            "passions": passions,
-        }
-        res = save_profile(payload)
-        if res.get("ok"):
-            st.success("Saved ✅")
-            st.session_state.user_id = user_id
-            st.session_state.username = username
-        else:
-            st.error(f"Save failed: {res.get('error') or 'unknown error'}")
+        include_mock_feed = st.checkbox("Include test data", value=False)
 
-# ---------- DISCOVER ----------
-with tab_discover:
-    left, right = st.columns([1, 3], gap="large")
-
-    with left:
-        st.subheader("Feed controls")
-        st.caption("Uses Settings → city/country/keywords/date window.")
-        include_mock_feed = st.checkbox("Include mock in feed", value=False)
-        if st.button("Refresh now"):
+        if st.button("🔄 Refresh Feed", type="primary"):
             st.rerun()
 
-    with right:
-        st.subheader("Recommended for you")
-        prof = load_profile(st.session_state.user_id)
+        # Show current search params
+        with st.expander("Search Parameters"):
+            st.json({
+                "city": profile.get("city", "Not set"),
+                "country": profile.get("country", "Not set"),
+                "days_ahead": profile.get("days_ahead", 120),
+                "keywords": profile.get("keywords", "None")
+            })
 
-        if not (prof.get("city") and prof.get("country")):
-            st.info("Set your **Home city** and **Country** in Settings, then click Refresh.")
+    with col2:
+        st.subheader("📅 Recommended Events")
+
+        # Check if location is set
+        if not (profile.get("city") and profile.get("country")):
+            st.warning(
+                "🏠 Please set your **Home City** and **Country** in Settings to see recommendations."
+            )
         else:
-            res = search_from_profile(prof, include_mock_feed)
+            # Search for events
+            with st.spinner("🔍 Finding events..."):
+                search_result = search_from_profile(profile, include_mock_feed)
 
-            if res.get("count", 0) == 0:
-                st.info("No events matched your Settings. Try widening the date window or clearing keywords.")
-                dbg = res.get("debug")
-                if dbg:
-                    with st.expander("Diagnostics"):
-                        st.json(dbg)
+            # Display results
+            items = search_result.get("items", [])
+
+            if not items:
+                st.info(
+                    "🤷 No events found matching your criteria. Try adjusting your settings or expanding the date range.")
+
+                # Show debug info
+                debug = search_result.get("debug", {})
+                if debug:
+                    with st.expander("🔧 Debug Information"):
+                        st.json(debug)
             else:
-                items: List[Dict[str, Any]] = res.get("items", [])
-                passions = {p.lower() for p in (prof.get("passions") or [])}
+                st.success(f"✨ Found {len(items)} events for you!")
 
-                def score(ev: Dict[str, Any]) -> int:
-                    t = (ev.get("title") or "").lower()
-                    c = (ev.get("category") or "").lower()
-                    s = 0
-                    for p in passions:
-                        if p in t: s += 2
-                        if p in c: s += 1
-                    return -s
+                # Sort by user preferences
+                passions = {p.lower() for p in profile.get("passions", [])}
 
-                items.sort(key=score)
-                for i, ev in enumerate(items):
-                    event_card(ev, key=f"{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
+                def relevance_score(event):
+                    score = 0
+                    title = (event.get("title", "")).lower()
+                    category = (event.get("category", "")).lower()
 
-    st.divider()
-    st.caption("Tip: update Settings and click Refresh.")
+                    for passion in passions:
+                        if passion in title:
+                            score += 3
+                        if passion in category:
+                            score += 2
 
-# ---------- CHAT ----------
-with tab_chat:
-    st.header("Chat with Socialite 🤖")
-    st.caption("Ask for plans or specifics; the agent reads your Settings.")
+                    return score
 
-    message = st.text_input("Message", placeholder="e.g., live music next weekend in my city")
-    if st.button("Send", type="primary"):
-        prof = load_profile(st.session_state.user_id)
-        payload = {
+                # Sort by relevance (highest first)
+                items.sort(key=relevance_score, reverse=True)
+
+                # Display events
+                for idx, event in enumerate(items):
+                    event_card(
+                        event,
+                        key=f"discover_{idx}_{event.get('title', '')[:20]}",
+                        user_id=st.session_state.user_id
+                    )
+
+# ---------- CHAT TAB ----------
+with tabs[1]:
+    st.header("💬 Chat with Socialite")
+    st.caption(
+        "Ask me about events, get recommendations, or plan your activities!")
+
+    # Chat interface
+    profile = load_profile(st.session_state.user_id)
+
+    message = st.text_input(
+        "💭 What are you looking for?",
+        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'"
+    )
+
+    if st.button("📤 Send", type="primary") and message:
+        # Prepare chat payload
+        chat_payload = {
             "user_id": st.session_state.user_id,
             "username": st.session_state.username,
             "message": message,
-            "city": prof.get("city"),
-            "country": prof.get("country"),
+            "city": profile.get("city"),
+            "country": profile.get("country"),
         }
-        with st.spinner("Thinking…"):
-            # longer timeout for agent
-            res = _post("/agent/chat", payload, timeout=60)
 
-        if res.get("ok") is False and res.get("error"):
-            st.error(f"Agent error: {res['error']}")
+        # Send to agent
+        with st.spinner("🤔 Thinking..."):
+            response = _post("/agent/chat", chat_payload, timeout=60)
+
+        # Display response
+        if response.get("error"):
+            st.error(f"❌ Chat failed: {response['error']}")
         else:
-            st.write(res.get("answer") or res)
-            items = res.get("items") or []
-            if items:
-                st.markdown("#### Picks")
-                for i, ev in enumerate(items[:10]):
-                    event_card(ev, key=f"chat_{i}_{ev.get('title', '')}", user_id=st.session_state.user_id)
+            # Show answer
+            answer = response.get(
+                "answer", "I'm not sure how to help with that.")
+            st.markdown(f"🤖 **Socialite**: {answer}")
 
+            # Show recommended events if any
+            events = response.get("items", [])
+            if events:
+                st.markdown("### 🎯 Recommended Events")
+                for idx, event in enumerate(events[:5]):  # Limit to 5 events
+                    event_card(
+                        event,
+                        key=f"chat_{idx}_{event.get('title', '')[:20]}",
+                        user_id=st.session_state.user_id
+                    )
+
+    # Subscription section
     st.divider()
-    st.subheader("Subscriptions")
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("Subscribe me weekly"):
-            prof = load_profile(st.session_state.user_id)
-            payload = {
+    st.subheader("📬 Subscriptions")
+    st.caption("Get personalized event digests delivered regularly.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("📅 Subscribe Weekly"):
+            sub_payload = {
                 "user_id": st.session_state.user_id,
-                "city": prof.get("city"),
-                "country": prof.get("country"),
+                "city": profile.get("city"),
+                "country": profile.get("country"),
                 "cadence": "WEEKLY",
-                "keywords": prof.get("passions") or [],
+                "keywords": profile.get("passions", []),
             }
-            res = _post("/agent/subscribe", payload)
-            if res.get("ok"):
-                st.success("Subscribed ✅")
+
+            result = _post("/agent/subscribe", sub_payload)
+
+            if result.get("ok"):
+                st.success("✅ Subscribed to weekly digest!")
             else:
-                st.warning(res.get("hint") or res.get("error") or "Subscription not configured")
-    with colB:
-        if st.button("Fetch latest digest now"):
-            res = _get(f"/agent/digest/{st.session_state.user_id}")
-            digest = res.get("digest") if isinstance(res, dict) else None
+                hint = result.get("hint", "Subscription feature coming soon!")
+                st.info(f"ℹ️ {hint}")
+
+    with col2:
+        if st.button("📧 Get Latest Digest"):
+            digest_result = _get(f"/agent/digest/{st.session_state.user_id}")
+
+            digest = digest_result.get("digest", [])
             if digest:
-                with st.expander("Latest digest"):
-                    for card in digest:
-                        st.markdown(f"**{card.get('title', '(untitled)')}**")
-                        if card.get("note"):
-                            st.write(card["note"])
+                with st.expander("📰 Latest Digest", expanded=True):
+                    for item in digest:
+                        st.markdown(f"**{item.get('title', 'Event')}**")
+                        if item.get("note"):
+                            st.write(item["note"])
                         st.divider()
             else:
-                st.info("No digest available yet.")
+                st.info("📭 No digest available yet. Try subscribing first!")
+
+# =========================
+# Footer
+# =========================
+st.divider()
+st.caption("🎟️ Socialite - Discover amazing events in your city!")
