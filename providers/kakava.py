@@ -10,8 +10,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
-from services import http
-from providers.base import build_event, to_iso_z
+from ..services import http
+from .base import build_event
 
 KEY = "kakava"
 NAME = "Kakava"
@@ -24,7 +24,7 @@ SEARCH_LT = f"{BASE}/lt/search"
 CATEGORY_SLUGS = {
     "concerts":   {"en": ["concerts"],             "lt": ["koncertai"]},
     "theatre":    {"en": ["theatre", "theater"],   "lt": ["teatras"]},
-    "exhibitions":{"en": ["exhibitions"],          "lt": ["parodos", "paroda"]},
+    "exhibitions": {"en": ["exhibitions"],          "lt": ["parodos", "paroda"]},
     "sport":      {"en": ["sport"],                "lt": ["sportas"]},
     "festivals":  {"en": ["festivals"],            "lt": ["festivaliai"]},
     "kids":       {"en": ["for-kids", "kids"],     "lt": ["vaikams"]},
@@ -32,19 +32,23 @@ CATEGORY_SLUGS = {
     "other":      {"en": ["other"],                "lt": ["kiti", "kita"]},
 }
 
+
 @dataclass(frozen=True)
 class Window:
     start: datetime
     end: datetime
 
+
 _jsonld_re = re.compile(r"^\s*{")
 
 # ---------- time & cleaning helpers ----------
+
 
 def _calc_window_from_days(start_in_days: int, days_ahead: int) -> Window:
     start = datetime.now(timezone.utc) + timedelta(days=start_in_days)
     end = start + timedelta(days=days_ahead)
     return Window(start=start, end=end)
+
 
 def _parse_date(dt: Optional[str]) -> Optional[datetime]:
     if not dt:
@@ -55,27 +59,60 @@ def _parse_date(dt: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _within_window(d: Optional[datetime], w: Window) -> bool:
     return bool(d and (w.start <= d <= w.end))
+
 
 def _clean(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     return re.sub(r"\s+", " ", s).strip()
 
+
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s)
     return "".join(ch for ch in s if not unicodedata.combining(ch)).lower().strip()
 
+
+# Map common Kakava country names → ISO-2
+_COUNTRY_MAP = {
+    "Lietuva": "LT", "Lithuania": "LT",
+    "Latvija": "LV", "Latvia": "LV",
+    "Eesti": "EE", "Estonia": "EE",
+    "Suomija": "FI", "Finland": "FI",
+    "Polska": "PL", "Poland": "PL",
+}
+
+
+def _country_str(x: Any, default_iso: str = "LT") -> str:
+    """
+    Accepts a string or a JSON-LD dict like {"@type":"Country","name":"Lietuva"}.
+    Returns a 2-letter ISO code.
+    """
+    if isinstance(x, str):
+        name = x.strip()
+        return _COUNTRY_MAP.get(name, (name[:2].upper() if len(name) >= 2 else default_iso))
+    if isinstance(x, dict):
+        name = (x.get("name") or x.get("identifier") or "").strip()
+        if name:
+            return _COUNTRY_MAP.get(name, (name[:2].upper() if len(name) >= 2 else default_iso))
+    return default_iso
+
 # ---------- network ----------
 
+
 def _fetch(url: str) -> Optional[str]:
-    r = http.get(url, timeout=15)
-    if r.status_code == 200:
-        return r.text
+    try:
+        r = http.get(url, timeout=15)
+        if r.status_code == 200:
+            return r.text
+    except Exception:
+        pass
     return None
 
 # ---------- link extraction ----------
+
 
 def _extract_event_links_from_html(html: str) -> List[str]:
     """
@@ -102,6 +139,7 @@ def _extract_event_links_from_html(html: str) -> List[str]:
     return out
 
 # ---------- json-ld parsing ----------
+
 
 def _extract_jsonld_events(html: str) -> List[Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
@@ -131,6 +169,7 @@ def _extract_jsonld_events(html: str) -> List[Dict[str, Any]]:
                         items.append(g)
     return items
 
+
 def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[str, Any]:
     title = _clean(e.get("name"))
     url = e.get("url") or None
@@ -146,8 +185,9 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
         venue_name = _clean(loc.get("name"))
         addr = loc.get("address") or {}
         if isinstance(addr, dict):
-            city = _clean(addr.get("addressLocality") or addr.get("addressRegion"))
-            country = _clean(addr.get("addressCountry")) or country_default
+            city = _clean(addr.get("addressLocality")
+                          or addr.get("addressRegion"))
+            country = _country_str(addr.get("addressCountry"), country_default)
 
     # NEW: try to extract description and image
     description = e.get("description") or None
@@ -198,6 +238,7 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
 
 # ---------- pagination helpers ----------
 
+
 def _bump_page(url: str, page: int) -> str:
     """
     Try to set ?page=N (or &page=N) while keeping other query params.
@@ -207,6 +248,7 @@ def _bump_page(url: str, page: int) -> str:
     qs["page"] = str(page)
     new_q = urlencode(qs)
     return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_q, pr.fragment))
+
 
 def _paginate_urls(seed_url: str, max_pages: int = 5) -> Iterable[str]:
     """
@@ -225,6 +267,7 @@ def _paginate_urls(seed_url: str, max_pages: int = 5) -> Iterable[str]:
 
 # ---------- category crawling ----------
 
+
 def _category_urls(language: str = "en") -> List[tuple[str, str]]:
     """
     Returns [(friendly_category, full_url), ...] for the given language.
@@ -235,6 +278,7 @@ def _category_urls(language: str = "en") -> List[tuple[str, str]]:
         for slug in slugs.get(lang, []):
             urls.append((cat_key, f"{BASE}/{lang}/{slug}".rstrip("/")))
     return urls
+
 
 def _crawl_categories(language: str = "en", max_pages: int = 5) -> List[tuple[str, str]]:
     """
@@ -260,6 +304,7 @@ def _crawl_categories(language: str = "en", max_pages: int = 5) -> List[tuple[st
 
 # ---------- search fallback ----------
 
+
 def _search_site(query: str, language: str = "en") -> List[str]:
     base = SEARCH_EN if language.lower().startswith("en") else SEARCH_LT
     url = f"{base}?{urlencode({'query': query})}"
@@ -272,6 +317,8 @@ def _search_site(query: str, language: str = "en") -> List[str]:
 # Compatible with both calling styles:
 #  - aggregator passing (start, end)
 #  - old style (days_ahead, start_in_days)
+
+
 def search(
     *,
     city: str,
@@ -290,7 +337,8 @@ def search(
     """
     # Build date window
     if start is not None and end is not None:
-        window = Window(start=start.astimezone(timezone.utc), end=end.astimezone(timezone.utc))
+        window = Window(start=start.astimezone(timezone.utc),
+                        end=end.astimezone(timezone.utc))
     else:
         window = _calc_window_from_days(start_in_days, days_ahead)
 
