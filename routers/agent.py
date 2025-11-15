@@ -1,30 +1,30 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
+import re
+from typing import Optional, Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
-
-from ..services.aggregator import search_events_sync
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Try to import agent services
 _services_agent = None
 _root_agent = None
-
 try:
-    from ..services.agent import chat_with_agent
-    _services_agent = chat_with_agent
+    from services import agent as _services_agent
 except Exception:
     _services_agent = None
 
 try:
-    from ..services.root_agent import RootAgent
-    _root_agent = RootAgent()
+    import agent as _root_agent 
 except Exception:
     _root_agent = None
+
+try:
+    from services.aggregator import search_events_sync as _agg_sync
+except Exception:
+    _agg_sync = None
 
 # ---------- Models ----------
 
