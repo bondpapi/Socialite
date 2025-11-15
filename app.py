@@ -78,37 +78,72 @@ def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
     # API expects POST /profile (body contains user_id)
     return _post("/profile", p)
 
+def _coerce_country(value) -> str:
+    """
+    Accepts 'LT', 'lt', {'code':'LT'}, {'countryCode':'LT'}, {'name':'Lithuania'}, etc.
+    Returns a best-effort ISO-2 uppercase string or ''.
+    """
+    if isinstance(value, str):
+        return value.strip().upper()[:2]
+    if isinstance(value, dict):
+        for k in ("code", "alpha2", "alpha_2", "countryCode"):
+            v = value.get(k)
+            if v:
+                return str(v).strip().upper()[:2]
+        # last resort: take the first two letters of the name
+        name = value.get("name")
+        if name:
+            return str(name).strip().upper()[:2]
+    return ""
 
 def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
-    city = (p.get("city") or "").strip()
-    country_raw: Union[str, dict, None] = p.get("country")
+    city = (p.get("city") or "").strip().title()
+    country = _coerce_country(p.get("country"))
 
-    # Coerce country to ISO-2 string defensively
-    if isinstance(country_raw, dict):
-        country = (country_raw.get("code") or country_raw.get("name") or "").strip()
-    else:
-        country = (country_raw or "").strip()
-    country = country.upper()[:2] if country else ""
-
-    if not city or len(country) != 2:
+    # only block when we truly have nothing usable
+    if not city or not country:
         return {
             "count": 0,
             "items": [],
-            "debug": {"reason": "invalid_location", "city": city, "country": country},
+            "debug": {
+                "reason": "invalid_location",
+                "city": city,
+                "country_raw": p.get("country"),
+                "country_coerced": country,
+            },
         }
 
-    params = {
+    days_ahead = int(p.get("days_ahead") or 120)
+    start_in_days = int(p.get("start_in_days") or 0)
+    params: Dict[str, Any] = {
         "city": city,
         "country": country,
-        "days_ahead": int(p.get("days_ahead") or 120),
-        "start_in_days": int(p.get("start_in_days") or 0),
+        "days_ahead": days_ahead,
+        "start_in_days": start_in_days,
         "include_mock": bool(include_mock),
     }
-    if p.get("keywords"):
-        params["query"] = p["keywords"]
+    q = (p.get("keywords") or "").strip()
+    if q:
+        params["query"] = q
 
-    res = _get("/events/search", **params)
-    return res if isinstance(res, dict) else {"count": 0, "items": []}
+    result = _get("/events/search", **params)
+    if not isinstance(result, dict):
+        return {
+            "count": 0,
+            "items": [],
+            "debug": {"reason": "no_response", "sent_params": params},
+        }
+
+    # normalize count so the UI logic is consistent
+    items = result.get("items") or []
+    normalized_count = int(result.get("count") or result.get("total") or len(items))
+    result["count"] = normalized_count
+
+    # include what we actually asked the API for easier debugging
+    dbg = result.get("debug") or {}
+    dbg["sent_params"] = params
+    result["debug"] = dbg
+    return result
 
 # UI components
 def event_card(e: Dict[str, Any], key: str, user_id: str):
