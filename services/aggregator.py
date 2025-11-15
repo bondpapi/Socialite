@@ -1,4 +1,3 @@
-# services/aggregator.py
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +10,17 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+try:
+    from providers.base import _coerce_country
+except ImportError:
+    # Fallback if base module is not available
+    def _coerce_country(cc: Any, default: str) -> str:
+        if isinstance(cc, str) and len(cc.strip()) == 2:
+            return cc.strip().upper()
+        return default
+
 # ---------- Provider dataclass ----------
+
 
 @dataclass
 class Provider:
@@ -20,6 +29,7 @@ class Provider:
     fn: Callable[..., Any]
     is_async: bool
     name: str = ""
+
 
 # discovery bookkeeping
 _DISCOVERY: Dict[str, Any] = {
@@ -32,11 +42,13 @@ _PROVIDERS: List[Provider] = []
 
 # ---------- Module discovery ----------
 
+
 def _iter_provider_modules() -> Iterable[str]:
     pkg_name = "providers"
     try:
         pkg = importlib.import_module(pkg_name)
-        for m in pkgutil.iter_modules(pkg.__path__, pkg_name + "."):  # type: ignore[attr-defined]
+        # type: ignore[attr-defined]
+        for m in pkgutil.iter_modules(pkg.__path__, pkg_name + "."):
             leaf = m.name.rsplit(".", 1)[-1]
             if leaf.startswith("_"):
                 continue
@@ -60,6 +72,7 @@ def _iter_provider_modules() -> Iterable[str]:
             yield mod
 
 # ---------- Loader ----------
+
 
 def _load_providers(mod_names: Optional[List[str]] = None) -> None:
     _PROVIDERS.clear()
@@ -101,7 +114,7 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
                         def _call(**kw):
                             return sfn(**kw)
                         try:
-                            _call.__wrapped__ = sfn  # let inspect.signature see real target
+                            _call.__wrapped__ = sfn
                         except Exception:
                             pass
                         prov = Provider(
@@ -153,22 +166,33 @@ def _load_providers(mod_names: Optional[List[str]] = None) -> None:
         except Exception as e:
             _DISCOVERY["errors"][mod_name] = f"{type(e).__name__}: {e}"
 
+
+def _sanitize_item(ev: Dict[str, Any], default_cc: str) -> Optional[Dict[str, Any]]:
+    cc = _coerce_country(ev.get("country"), default_cc)
+    ev["country"] = cc
+    return ev if cc else None
+
+
 # initial load
 _load_providers()
 
 # ---------- Diagnostics / helpers ----------
 
+
 def list_provider_diagnostics() -> Dict[str, Any]:
     return {
         "providers": [
-            {"key": p.key, "module": p.module, "is_async": p.is_async, "name": p.name}
+            {"key": p.key, "module": p.module,
+                "is_async": p.is_async, "name": p.name}
             for p in _PROVIDERS
         ],
         "discovery": _DISCOVERY,
     }
 
+
 def _discover_providers() -> List[Provider]:
     return list(_PROVIDERS)
+
 
 def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
     providers = _discover_providers()
@@ -178,11 +202,15 @@ def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
 
 # ---------- Fan-out utilities ----------
 
+
 def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
-    start = (now + timedelta(days=start_in_days)).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = (now + timedelta(days=start_in_days + days_ahead)).replace(hour=23, minute=59, second=59, microsecond=0)
+    start = (now + timedelta(days=start_in_days)
+             ).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = (now + timedelta(days=start_in_days + days_ahead)
+           ).replace(hour=23, minute=59, second=59, microsecond=0)
     return start, end
+
 
 def _filter_kwargs(func, **kw):
     """
@@ -203,6 +231,7 @@ def _filter_kwargs(func, **kw):
         common = ("city", "country", "start", "end", "query")
         return {k: v for k, v in kw.items() if k in common}
 
+
 def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen, out = set(), []
     for e in items:
@@ -218,12 +247,14 @@ def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(e)
     return out
 
+
 def _sort_key(e: Dict[str, Any]):
     start = e.get("start_time") or "9999-12-31T00:00:00Z"
     title = (e.get("title") or "").lower()
     return (start, title)
 
 # ---------- Core fan-out ----------
+
 
 async def _call_provider(
     p: Provider,
@@ -236,14 +267,16 @@ async def _call_provider(
     limit: int,
     offset: int,
 ) -> Tuple[str, List[Dict[str, Any]], Optional[str]]:
-    # IMPORTANT: do NOT forward limit/offset to providers
-    raw_kwargs = dict(city=city, country=country, start=start, end=end, query=query)
+
+    raw_kwargs = dict(city=city, country=country,
+                      start=start, end=end, query=query)
     kwargs = _filter_kwargs(p.fn, **raw_kwargs)
     try:
         if p.is_async:
             chunk = await p.fn(**kwargs)  # type: ignore[misc]
         else:
-            chunk = await asyncio.to_thread(p.fn, **kwargs)  # type: ignore[misc]
+            # type: ignore[misc]
+            chunk = await asyncio.to_thread(p.fn, **kwargs)
     except Exception as exc:
         return p.key, [], f"{type(exc).__name__}: {exc}"
 
@@ -256,6 +289,7 @@ async def _call_provider(
                 e.setdefault("source", p.key)
                 items.append(e)
     return p.key, items, None
+
 
 async def _search_events_async(
     *,
@@ -303,12 +337,17 @@ async def _search_events_async(
     for key, chunk, err in results:
         if err:
             provider_errors[key] = err
-        items.extend(chunk)
+        else:
+            # Sanitize items from this provider
+            default_cc = country[:2].upper() if country else "LT"
+            sanitized_chunk = [_sanitize_item(e, default_cc) for e in chunk]
+            sanitized_chunk = [e for e in sanitized_chunk if e is not None]
+            items.extend(sanitized_chunk)
 
     items = _dedupe(items)
     items.sort(key=_sort_key)
     total = len(items)
-    page = items[offset : offset + limit]
+    page = items[offset: offset + limit]
 
     return {
         "count": len(page),
@@ -325,6 +364,7 @@ async def _search_events_async(
     }
 
 # Public API
+
 
 async def search_events(
     *,
@@ -347,6 +387,7 @@ async def search_events(
         limit=limit,
         offset=offset,
     )
+
 
 def search_events_sync(
     *,
@@ -371,3 +412,7 @@ def search_events_sync(
             offset=offset,
         )
     )
+
+
+# Export for compatibility
+PROVIDERS = _PROVIDERS
