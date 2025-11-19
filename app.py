@@ -128,31 +128,55 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
             },
         }
 
-    days_ahead = int(p.get("days_ahead") or 120)
+    # slightly smaller default window helps keep responses snappy
+    days_ahead = int(p.get("days_ahead") or 90)
     start_in_days = int(p.get("start_in_days") or 0)
+
     params: Dict[str, Any] = {
         "city": city,
         "country": country,
         "days_ahead": days_ahead,
         "start_in_days": start_in_days,
         "include_mock": bool(include_mock),
+        "limit": 20,  # keep payloads small to avoid UI timeouts
     }
     q = (p.get("keywords") or "").strip()
     if q:
         params["query"] = q
 
-    result = _get("/events/search", **params)
+    # ---- single-shot GET (no retry) with longer timeout ----
+    url = f"{API}/events/search"
+    t0 = time.time()
+    try:
+        r = requests.get(url, params=params, timeout=60)
+        elapsed_ms = int((time.time() - t0) * 1000)
+        r.raise_for_status()
+        result = r.json()
+    except Exception as e:
+        elapsed_ms = int((time.time() - t0) * 1000)
+        return {
+            "count": 0,
+            "items": [],
+            "debug": {
+                "reason": "no_response",
+                "error": str(e),
+                "sent_params": params,
+                "url": url,
+                "elapsed_ms": elapsed_ms,
+            },
+        }
+    # --------------------------------------------------------
+
     if not isinstance(result, dict):
         return {
             "count": 0,
             "items": [],
-            "debug": {"reason": "no_response", "sent_params": params},
+            "debug": {"reason": "no_response", "sent_params": params, "url": url},
         }
 
     # normalize count so the UI logic is consistent
     items = result.get("items") or []
-    normalized_count = int(result.get(
-        "count") or result.get("total") or len(items))
+    normalized_count = int(result.get("count") or result.get("total") or len(items))
     result["count"] = normalized_count
 
     # include what we actually asked the API for easier debugging
@@ -160,6 +184,26 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
     dbg["sent_params"] = params
     result["debug"] = dbg
     return result
+
+
+# --- no-retry helper for heavy endpoints ---
+def _get_noretry(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
+    url = f"{API}{path}"
+    t0 = time.time()
+    try:
+        # use a fresh requests call (bypasses the Session with retries)
+        r = requests.get(url, params=params, timeout=timeout)
+        elapsed = round((time.time() - t0) * 1000)
+        if st.sidebar:
+            st.sidebar.caption(f"GET (no-retry) {path} → {r.status_code} ({elapsed}ms)")
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        elapsed = round((time.time() - t0) * 1000)
+        if st.sidebar:
+            st.sidebar.error(f"GET (no-retry) {path} failed ({elapsed}ms): {str(e)[:80]}")
+        return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
+
 
 # UI components
 
