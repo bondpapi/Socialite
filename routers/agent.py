@@ -1,41 +1,43 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from services import http  # same HTTP helper you use in providers
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Use the same aggregator that powers Discover
-try:
-    from services.aggregator import search_events_sync as _agg_sync
-except Exception:
-    _agg_sync = None
+# -------------------------------------------------
+# Internal API base (for calling /events/search)
+# -------------------------------------------------
+_api_port = os.getenv("API_PORT", "8000")
+INTERNAL_API = os.getenv(
+    "SOCIALITE_INTERNAL_API",
+    f"http://127.0.0.1:{_api_port}"
+).rstrip("/")
 
-# ---------- Models ----------
+# -------------------------------------------------
+# Models
+# -------------------------------------------------
 
 
 class ChatRequest(BaseModel):
     user_id: str
-    message: str
     username: Optional[str] = None
+    message: str
     city: Optional[str] = None
     country: Optional[str] = None
-    # optional window controls, with safe defaults
-    days_ahead: int = 120
-    start_in_days: int = 0
-    include_mock: bool = False
-    limit: int = 30
-    offset: int = 0
 
 
 class ChatResponse(BaseModel):
     ok: bool = True
     answer: str
-    items: List[Dict[str, Any]] = Field(default_factory=list)
-    debug: Dict[str, Any] = Field(default_factory=dict)
+    items: List[Dict[str, Any]] = []
+    debug: Dict[str, Any] = {}
 
 
 class SubscribeRequest(BaseModel):
@@ -43,102 +45,175 @@ class SubscribeRequest(BaseModel):
     city: Optional[str] = None
     country: Optional[str] = None
     cadence: str = "WEEKLY"  # WEEKLY, DAILY
-    keywords: List[str] = Field(default_factory=list)
+    keywords: List[str] = []
 
 
 class DigestResponse(BaseModel):
-    digest: List[Dict[str, Any]] = Field(default_factory=list)
+    digest: List[Dict[str, Any]] = []
     generated_at: Optional[str] = None
 
 
-# ---------- Helpers ----------
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 
-_CITY_HINT = re.compile(r"\b(?:in|around|near)\s+([A-Za-zÀ-ž\-\.'\s]{2,})\b", re.I)
-_COUNTRY_ISO2 = re.compile(r"\b(?:country|cc)\s*[:=]\s*([A-Za-z]{2})\b", re.I)
-
-
-def _infer_city_country(
-    message: str,
-    fallback_city: Optional[str],
-    fallback_country: Optional[str],
-) -> Tuple[Optional[str], Optional[str]]:
-    """Infer city/country from the free-text message with fallbacks."""
-    city = fallback_city
-    m = _CITY_HINT.search(message or "")
-    if m:
-        city = m.group(1).strip(" .,")
-
-    country = (fallback_country or "")
-    m2 = _COUNTRY_ISO2.search(message or "")
-    if m2:
-        country = m2.group(1).upper()
-
-    return (city, country or None)
+_EVENT_KEYWORDS = re.compile(
+    r"\b(event|events|concert|show|gig|music|festival|party|"
+    r"sport|sports|game|match|comedy|theatre|theater|exhibition|museum)\b",
+    re.IGNORECASE,
+)
 
 
-def _short_answer(city: Optional[str], country: Optional[str], total: int) -> str:
-    loc = ", ".join([p for p in [city, country] if p])
-    loc = f" in {loc}" if loc else ""
-    noun = "event" if total == 1 else "events"
-    if total == 0:
-        return f"I couldn’t find any events{loc} for that request."
-    return f"I found {total} {noun}{loc}. Here are some picks."
+def _infer_city_country(req: ChatRequest) -> Tuple[str, str]:
+    city = (req.city or "").strip()
+    country = (req.country or "").strip()
+
+    if not city:
+        city = "Vilnius"  # sensible default
+    if not country:
+        country = "LT"
+
+    return city, country.upper()[:2]
 
 
-# ---------- Routes ----------
+def _search_events_via_api(
+    *, city: str, country: str, query: Optional[str] = None
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Call our own /events/search endpoint inside the container so that the agent
+    reuses the same aggregator logic as /events/search and Discover.
+    """
+    params: Dict[str, Any] = {
+        "city": city,
+        "country": country,
+        "days_ahead": 30,    
+        "start_in_days": 0,
+        "include_mock": True,
+        "limit": 20,
+        "offset": 0,
+    }
+    if query:
+        params["query"] = query
+
+    resp = http.get(
+        f"{INTERNAL_API}/events/search",
+        params=params,
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json() or {}
+    return data, params
+
+
+# -------------------------------------------------
+# Fallback agent
+# -------------------------------------------------
+
+
+def _fallback_agent(req: ChatRequest) -> ChatResponse:
+    """
+    Simple, robust agent that:
+      - Detects if the user is asking about events
+      - Calls /events/search internally
+      - Returns a short natural-language answer + top events
+    """
+    message_lower = req.message.lower()
+
+    # If user is not clearly asking about events, give guidance instead of calling search
+    if not _EVENT_KEYWORDS.search(message_lower):
+        return ChatResponse(
+            ok=True,
+            answer=(
+                "I can help you discover events and activities. "
+                "Try something like:\n"
+                "- 'concerts this weekend in Vilnius'\n"
+                "- 'family events tomorrow'\n"
+                "- 'comedy shows next month in Kaunas'"
+            ),
+            items=[],
+            debug={"fallback": True, "reason": "no_event_keywords"},
+        )
+
+    city, country = _infer_city_country(req)
+
+    try:
+        data, sent_params = _search_events_via_api(
+            city=city,
+            country=country,
+            query=None,
+        )
+        items = data.get("items") or []
+
+        if not items:
+            answer = (
+                f"I couldn't find any events in {city} over the next 30 days. "
+                "Try widening the search window in Settings."
+            )
+            return ChatResponse(
+                ok=True,
+                answer=answer,
+                items=[],
+                debug={
+                    "fallback": True,
+                    "city": city,
+                    "country": country,
+                    "sent_params": sent_params,
+                    "raw_response": data,
+                },
+            )
+
+        # Trim to a small set for the chat UI
+        top_items = items[:5]
+        answer = (
+            f"I found {len(items)} events in {city} over the next 30 days. "
+            "Here are a few picks:"
+        )
+        return ChatResponse(
+            ok=True,
+            answer=answer,
+            items=top_items,
+            debug={
+                "fallback": True,
+                "city": city,
+                "country": country,
+                "sent_params": sent_params,
+                "raw_count": data.get("count"),
+            },
+        )
+
+    except Exception as e:
+        # Any error in search – return a friendly message plus debug
+        return ChatResponse(
+            ok=True,
+            answer=(
+                "I'm having trouble searching for events right now. "
+                "Please try again later."
+            ),
+            items=[],
+            debug={
+                "fallback": True,
+                "error": str(e),
+                "city": city,
+                "country": country,
+                "internal_api": INTERNAL_API,
+            },
+        )
+
+
+# -------------------------------------------------
+# Routes
+# -------------------------------------------------
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """
-    Simple agent:
-    - infers city/country from the message + profile,
-    - calls the same aggregator used by Discover,
-    - returns a short summary + the event list.
+    Chat with the Socialite agent.
+
+    For now we always use the robust fallback that calls /events/search
+    internally, so behaviour is consistent with the Discover tab.
     """
-    if not _agg_sync:
-        return ChatResponse(
-            ok=False,
-            answer="The search engine is unavailable right now.",
-            debug={"error": "aggregator_unavailable"},
-        )
-
-    city, country = _infer_city_country(req.message, req.city, req.country)
-
-    try:
-        payload = _agg_sync(
-            city=city or (req.city or ""),
-            country=(country or req.country or "LT"),
-            days_ahead=req.days_ahead,
-            start_in_days=req.start_in_days,
-            include_mock=req.include_mock,
-            query=req.message,
-            limit=req.limit,
-            offset=req.offset,
-        )
-    except Exception as e:
-        return ChatResponse(
-            ok=False,
-            answer="I'm having trouble searching for events right now. Please try again later.",
-            debug={"error": str(e)},
-        )
-
-    items = payload.get("items") or []
-    total = int(payload.get("total") or payload.get("count") or len(items))
-
-    return ChatResponse(
-        ok=True,
-        answer=_short_answer(city, country, total),
-        items=items,
-        debug={
-            "agent": "simple_aggregator",
-            "providers_used": payload.get("providers_used"),
-            "provider_errors": (payload.get("debug") or {}).get(
-                "provider_errors"
-            ),
-            "window": (payload.get("debug") or {}).get("window"),
-        },
-    )
+    return _fallback_agent(req)
 
 
 @router.post("/subscribe")
@@ -173,10 +248,9 @@ async def get_digest(user_id: str) -> DigestResponse:
 @router.get("/status")
 async def agent_status() -> Dict[str, Any]:
     """
-    Get the status of available agent services.
-    Only the aggregator-backed simple agent is used now.
+    Simple status endpoint so you can see from logs / curl what mode the agent is in.
     """
     return {
-        "aggregator_available": _agg_sync is not None,
-        "fallback_enabled": True,
+        "mode": "fallback_only",
+        "internal_api": INTERNAL_API,
     }
