@@ -1,29 +1,37 @@
 from __future__ import annotations
 
-import os
-import re
-from typing import Optional, Dict, Any, List, Tuple
+import logging
+from typing import Optional, Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from services import http  # same HTTP helper you use in providers
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# -------------------------------------------------
-# Internal API base (for calling /events/search)
-# -------------------------------------------------
-_api_port = os.getenv("API_PORT", "8000")
-INTERNAL_API = os.getenv(
-    "SOCIALITE_INTERNAL_API",
-    f"http://127.0.0.1:{_api_port}"
-).rstrip("/")
+# Optional imports – we fall back gracefully if any are missing
+_services_agent = None
+_root_agent = None
+try:
+    from services import agent as _services_agent
+except Exception:
+    _services_agent = None
 
-# -------------------------------------------------
-# Models
-# -------------------------------------------------
+try:
+    # root-level agent.py (the OpenAI / tools agent you just showed)
+    import agent as _root_agent
+except Exception:
+    _root_agent = None
 
+try:
+    from services.aggregator import search_events_sync as _agg_sync
+except Exception:
+    _agg_sync = None
+
+
+# ---------- Models ----------
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -53,166 +61,162 @@ class DigestResponse(BaseModel):
     generated_at: Optional[str] = None
 
 
-# -------------------------------------------------
-# Helpers
-# -------------------------------------------------
-
-_EVENT_KEYWORDS = re.compile(
-    r"\b(event|events|concert|show|gig|music|festival|party|"
-    r"sport|sports|game|match|comedy|theatre|theater|exhibition|museum)\b",
-    re.IGNORECASE,
-)
-
-
-def _infer_city_country(req: ChatRequest) -> Tuple[str, str]:
-    city = (req.city or "").strip()
-    country = (req.country or "").strip()
-
-    if not city:
-        city = "Vilnius"  # sensible default
-    if not country:
-        country = "LT"
-
-    return city, country.upper()[:2]
-
-
-def _search_events_via_api(
-    *, city: str, country: str, query: Optional[str] = None
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Call our own /events/search endpoint inside the container so that the agent
-    reuses the same aggregator logic as /events/search and Discover.
-    """
-    params: Dict[str, Any] = {
-        "city": city,
-        "country": country,
-        "days_ahead": 30,    
-        "start_in_days": 0,
-        "include_mock": True,
-        "limit": 20,
-        "offset": 0,
-    }
-    if query:
-        params["query"] = query
-
-    resp = http.get(
-        f"{INTERNAL_API}/events/search",
-        params=params,
-        timeout=20,
-    )
-    resp.raise_for_status()
-    data = resp.json() or {}
-    return data, params
-
-
-# -------------------------------------------------
-# Fallback agent
-# -------------------------------------------------
-
+# ---------- Fallback agent ----------
 
 def _fallback_agent(req: ChatRequest) -> ChatResponse:
-    """
-    Simple, robust agent that:
-      - Detects if the user is asking about events
-      - Calls /events/search internally
-      - Returns a short natural-language answer + top events
-    """
-    message_lower = req.message.lower()
+    """Simple fallback when no LLM agent is available OR when it errors."""
+    msg = req.message.lower()
 
-    # If user is not clearly asking about events, give guidance instead of calling search
-    if not _EVENT_KEYWORDS.search(message_lower):
+    # If aggregator is not available, just answer generically
+    if _agg_sync is None:
         return ChatResponse(
-            ok=True,
             answer=(
-                "I can help you discover events and activities. "
-                "Try something like:\n"
-                "- 'concerts this weekend in Vilnius'\n"
-                "- 'family events tomorrow'\n"
-                "- 'comedy shows next month in Kaunas'"
+                "I can help you find events in your city, but the search engine "
+                "is temporarily unavailable. Please try again later."
             ),
-            items=[],
-            debug={"fallback": True, "reason": "no_event_keywords"},
+            debug={"fallback": True, "search_available": False},
         )
 
-    city, country = _infer_city_country(req)
+    # Simple keyword matching to decide whether to try a search
+    if any(word in msg for word in ["event", "concert", "show", "music", "sports"]):
+        city = req.city or "Vilnius"
+        country = req.country or "LT"
 
-    try:
-        data, sent_params = _search_events_via_api(
-            city=city,
-            country=country,
-            query=None,
-        )
-        items = data.get("items") or []
-
-        if not items:
-            answer = (
-                f"I couldn't find any events in {city} over the next 30 days. "
-                "Try widening the search window in Settings."
+        try:
+            result = _agg_sync(
+                city=city,
+                country=country,
+                days_ahead=30,
+                start_in_days=0,
+                include_mock=True,
             )
+
+            items = result.get("items", [])[:5]  # Take first 5
+            count = len(items)
+
+            if count > 0:
+                answer = f"I found {count} events in {city}. Here are some options:"
+            else:
+                answer = (
+                    f"I couldn't find any events in {city} right now. "
+                    "Try widening your search or check back later."
+                )
+
             return ChatResponse(
-                ok=True,
                 answer=answer,
-                items=[],
+                items=items,
                 debug={
                     "fallback": True,
-                    "city": city,
-                    "country": country,
-                    "sent_params": sent_params,
-                    "raw_response": data,
+                    "search_params": {"city": city, "country": country},
+                    "raw": result,
                 },
             )
+        except Exception as e:
+            logger.exception("Fallback search failed")
+            return ChatResponse(
+                answer=(
+                    "I'm having trouble searching for events right now. "
+                    "Please try again later."
+                ),
+                debug={"fallback": True, "error": str(e)},
+            )
 
-        # Trim to a small set for the chat UI
-        top_items = items[:5]
-        answer = (
-            f"I found {len(items)} events in {city} over the next 30 days. "
-            "Here are a few picks:"
-        )
-        return ChatResponse(
-            ok=True,
-            answer=answer,
-            items=top_items,
-            debug={
-                "fallback": True,
-                "city": city,
-                "country": country,
-                "sent_params": sent_params,
-                "raw_count": data.get("count"),
-            },
-        )
-
-    except Exception as e:
-        # Any error in search – return a friendly message plus debug
-        return ChatResponse(
-            ok=True,
-            answer=(
-                "I'm having trouble searching for events right now. "
-                "Please try again later."
-            ),
-            items=[],
-            debug={
-                "fallback": True,
-                "error": str(e),
-                "city": city,
-                "country": country,
-                "internal_api": INTERNAL_API,
-            },
-        )
+    # Generic response when the message is not obviously a search query
+    return ChatResponse(
+        answer=(
+            "I can help you find events and activities! "
+            "Try asking about concerts, shows, or sports in your city."
+        ),
+        debug={"fallback": True, "generic": True},
+    )
 
 
-# -------------------------------------------------
-# Routes
-# -------------------------------------------------
-
+# ---------- Routes ----------
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """
     Chat with the Socialite agent.
 
-    For now we always use the robust fallback that calls /events/search
-    internally, so behaviour is consistent with the Discover tab.
+    Priority:
+      1. Root agent (agent.py with OpenAI + tools)
+      2. services.agent (if present, legacy)
+      3. Simple fallback agent
     """
+    # 1) Root agent (your OpenAI + tools agent.py)
+    if _root_agent is not None:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # >>> THIS IS THE SNIPPET YOU ASKED ABOUT <<<
+                future = executor.submit(
+                    _root_agent.chat,
+                    user_id=req.user_id,
+                    message=req.message,
+                    username=req.username,
+                    city=req.city,
+                    country=req.country,
+                )
+                try:
+                    result = future.result(timeout=30)
+                except FuturesTimeout:
+                    logger.warning("root_agent.chat timed out")
+                    return ChatResponse(
+                        answer=(
+                            "The agent took too long to respond. "
+                            "Please try a simpler question or try again in a moment."
+                        ),
+                        debug={"timeout": True, "root_agent": True},
+                    )
+
+            if isinstance(result, dict):
+                answer = (
+                    result.get("answer")
+                    or "I had some trouble understanding that, but I'm here to help with events."
+                )
+                items = result.get("items") or []
+                debug: Dict[str, Any] = {"root_agent": True}
+
+                if "debug" in result:
+                    debug["agent_debug"] = result["debug"]
+                if "used_tools" in result:
+                    debug["used_tools"] = result["used_tools"]
+
+                return ChatResponse(answer=answer, items=items, debug=debug)
+
+            # Unexpected type – fall through to fallback
+            logger.warning("root_agent returned non-dict result: %r", type(result))
+        except Exception as e:
+            logger.exception("root_agent.chat failed: %s", e)
+        # On any error, drop to fallback
+        return _fallback_agent(req)
+
+    # 2) services.agent (legacy simple agent, if you ever wire one up)
+    if _services_agent is not None:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Assuming services.agent exposes a callable like `run(message, user_id)`
+                future = executor.submit(_services_agent, req.message, req.user_id)
+                try:
+                    text = future.result(timeout=30)
+                except FuturesTimeout:
+                    logger.warning("services_agent timed out")
+                    return ChatResponse(
+                        answer=(
+                            "The agent took too long to respond. "
+                            "Please try again."
+                        ),
+                        debug={"timeout": True, "services_agent": True},
+                    )
+
+            return ChatResponse(
+                answer=text,
+                debug={"services_agent": True},
+            )
+        except Exception as e:
+            logger.exception("services_agent failed: %s", e)
+            return _fallback_agent(req)
+
+    # 3) Fallback agent
     return _fallback_agent(req)
 
 
@@ -248,9 +252,11 @@ async def get_digest(user_id: str) -> DigestResponse:
 @router.get("/status")
 async def agent_status() -> Dict[str, Any]:
     """
-    Simple status endpoint so you can see from logs / curl what mode the agent is in.
+    Get the status of available agent services.
     """
     return {
-        "mode": "fallback_only",
-        "internal_api": INTERNAL_API,
+        "services_agent_available": _services_agent is not None,
+        "root_agent_available": _root_agent is not None,
+        "aggregator_available": _agg_sync is not None,
+        "fallback_enabled": True,
     }
