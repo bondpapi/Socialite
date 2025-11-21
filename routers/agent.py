@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -11,27 +11,31 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Optional imports – we fall back gracefully if any are missing
+# Optional agents
 _services_agent = None
 _root_agent = None
+
 try:
-    from services import agent as _services_agent
+    # legacy/simple agent in services.agent (may or may not exist)
+    from services import agent as _services_agent  # type: ignore
 except Exception:
     _services_agent = None
 
 try:
-    # root-level agent.py (the OpenAI / tools agent you just showed)
-    import agent as _root_agent
+    # your new tools-based agent at project root (agent.py)
+    import agent as _root_agent  # type: ignore
 except Exception:
     _root_agent = None
 
+# Aggregator sync helper (used by fallback)
 try:
-    from services.aggregator import search_events_sync as _agg_sync
+    from services.aggregator import search_events_sync as _agg_sync  # type: ignore
 except Exception:
     _agg_sync = None
 
 
 # ---------- Models ----------
+
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -61,93 +65,120 @@ class DigestResponse(BaseModel):
     generated_at: Optional[str] = None
 
 
-# ---------- Fallback agent ----------
+# ---------- Helpers ----------
 
-def _fallback_agent(req: ChatRequest) -> ChatResponse:
-    """Simple fallback when no LLM agent is available OR when it errors."""
-    msg = req.message.lower()
 
-    # If aggregator is not available, just answer generically
-    if _agg_sync is None:
+def _normalize_root_result(result: Any) -> ChatResponse:
+    """
+    Take whatever root agent returns and normalize to ChatResponse.
+    """
+    if isinstance(result, ChatResponse):
+        return result
+
+    if isinstance(result, dict):
+        items = result.get("items") or []
+        debug = result.get("debug") or {}
+        debug["agent"] = "root_agent"
         return ChatResponse(
-            answer=(
-                "I can help you find events in your city, but the search engine "
-                "is temporarily unavailable. Please try again later."
-            ),
-            debug={"fallback": True, "search_available": False},
+            ok=bool(result.get("ok", True)),
+            answer=result.get("answer")
+            or "I’m not sure how to respond, but you can still use Discover to browse events.",
+            items=items,
+            debug=debug,
         )
 
-    # Simple keyword matching to decide whether to try a search
-    if any(word in msg for word in ["event", "concert", "show", "music", "sports"]):
-        city = req.city or "Vilnius"
-        country = req.country or "LT"
+    return ChatResponse(
+        ok=False,
+        answer="I couldn’t understand the agent’s response, but you can still use Discover to browse events.",
+        debug={"agent": "root_agent", "raw_type": type(result).__name__},
+    )
 
+
+def _fallback_agent(req: ChatRequest) -> ChatResponse:
+    """
+    Simple, *fast* fallback that will never hang the HTTP request.
+    If possible, it does a quick event search; otherwise returns helpful text.
+    """
+    msg = req.message.lower()
+    wants_events = any(
+        w in msg for w in ["event", "events", "concert", "show", "music", "sport", "sports", "festival"]
+    )
+
+    city = req.city or "Vilnius"
+    country = (req.country or "LT").upper()
+
+    # only try aggregator when:
+    #  - user clearly wants events, and
+    #  - we actually have the sync helper
+    if wants_events and _agg_sync is not None:
         try:
-            result = _agg_sync(
-                city=city,
-                country=country,
-                days_ahead=30,
-                start_in_days=0,
-                include_mock=True,
-            )
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    _agg_sync,
+                    city=city,
+                    country=country,
+                    days_ahead=30,
+                    start_in_days=0,
+                    include_mock=True,
+                )
+                # Hard 15s cap on fallback search
+                result = future.result(timeout=15)
 
-            items = result.get("items", [])[:5]  # Take first 5
+            result = result or {}
+            items = result.get("items") or []
             count = len(items)
 
-            if count > 0:
-                answer = f"I found {count} events in {city}. Here are some options:"
+            if count:
+                answer = f"I found {count} events in {city}. Here are a few ideas:"
             else:
                 answer = (
-                    f"I couldn't find any events in {city} right now. "
-                    "Try widening your search or check back later."
+                    f"I couldn’t find any events in {city} right now. "
+                    f"Try widening the date range or changing the city."
                 )
 
             return ChatResponse(
+                ok=True,
                 answer=answer,
-                items=items,
+                items=items[:5],
                 debug={
                     "fallback": True,
-                    "search_params": {"city": city, "country": country},
-                    "raw": result,
+                    "city": city,
+                    "country": country,
+                    "source": "aggregator",
                 },
             )
-        except Exception as e:
-            logger.exception("Fallback search failed")
-            return ChatResponse(
-                answer=(
-                    "I'm having trouble searching for events right now. "
-                    "Please try again later."
-                ),
-                debug={"fallback": True, "error": str(e)},
-            )
 
-    # Generic response when the message is not obviously a search query
+        except FuturesTimeout:
+            logger.warning("Fallback aggregator search timed out")
+        except Exception as exc:
+            logger.exception("Fallback aggregator search failed: %r", exc)
+
+    # Generic / non-search fallback
     return ChatResponse(
+        ok=True,
         answer=(
-            "I can help you find events and activities! "
-            "Try asking about concerts, shows, or sports in your city."
+            "I can help you look for events and activities. "
+            "Try asking something like “concerts this weekend in Vilnius” "
+            "or use the Discover tab to browse events."
         ),
-        debug={"fallback": True, "generic": True},
+        debug={"fallback": True, "source": "generic"},
     )
 
 
 # ---------- Routes ----------
 
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """
     Chat with the Socialite agent.
-
-    Priority:
-      1. Root agent (agent.py with OpenAI + tools)
-      2. services.agent (if present, legacy)
-      3. Simple fallback agent
+    We try the root tools-based agent first, then an optional legacy agent,
+    and finally a fast fallback that never hangs.
     """
-    # 1) Root agent (your OpenAI + tools agent.py)
-    if _root_agent is not None:
+    # 1) Root agent (agent.py at project root) – tools + OpenAI
+    if _root_agent is not None and hasattr(_root_agent, "chat"):
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                # >>> THIS IS THE SNIPPET YOU ASKED ABOUT <<<
                 future = executor.submit(
                     _root_agent.chat,
                     user_id=req.user_id,
@@ -156,67 +187,48 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     city=req.city,
                     country=req.country,
                 )
-                try:
-                    result = future.result(timeout=30)
-                except FuturesTimeout:
-                    logger.warning("root_agent.chat timed out")
-                    return ChatResponse(
-                        answer=(
-                            "The agent took too long to respond. "
-                            "Please try a simpler question or try again in a moment."
-                        ),
-                        debug={"timeout": True, "root_agent": True},
-                    )
+                # Hard cap so Render never hangs this endpoint forever
+                result = future.result(timeout=25)
 
-            if isinstance(result, dict):
-                answer = (
-                    result.get("answer")
-                    or "I had some trouble understanding that, but I'm here to help with events."
-                )
-                items = result.get("items") or []
-                debug: Dict[str, Any] = {"root_agent": True}
+            return _normalize_root_result(result)
 
-                if "debug" in result:
-                    debug["agent_debug"] = result["debug"]
-                if "used_tools" in result:
-                    debug["used_tools"] = result["used_tools"]
+        except FuturesTimeout:
+            logger.warning("root agent timed out for user %s", req.user_id)
+            # fall through to fallback
+        except Exception as exc:
+            logger.exception("root agent error for user %s: %r", req.user_id, exc)
+            # fall through to fallback
 
-                return ChatResponse(answer=answer, items=items, debug=debug)
-
-            # Unexpected type – fall through to fallback
-            logger.warning("root_agent returned non-dict result: %r", type(result))
-        except Exception as e:
-            logger.exception("root_agent.chat failed: %s", e)
-        # On any error, drop to fallback
-        return _fallback_agent(req)
-
-    # 2) services.agent (legacy simple agent, if you ever wire one up)
-    if _services_agent is not None:
+    # 2) Optional legacy services.agent.chat if present
+    if _services_agent is not None and hasattr(_services_agent, "chat"):
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                # Assuming services.agent exposes a callable like `run(message, user_id)`
-                future = executor.submit(_services_agent, req.message, req.user_id)
-                try:
-                    text = future.result(timeout=30)
-                except FuturesTimeout:
-                    logger.warning("services_agent timed out")
-                    return ChatResponse(
-                        answer=(
-                            "The agent took too long to respond. "
-                            "Please try again."
-                        ),
-                        debug={"timeout": True, "services_agent": True},
-                    )
+                future = executor.submit(
+                    _services_agent.chat,  # type: ignore[attr-defined]
+                    req.message,
+                    req.user_id,
+                )
+                result = future.result(timeout=10)
 
-            return ChatResponse(
-                answer=text,
-                debug={"services_agent": True},
-            )
-        except Exception as e:
-            logger.exception("services_agent failed: %s", e)
-            return _fallback_agent(req)
+            if isinstance(result, str):
+                return ChatResponse(
+                    ok=True,
+                    answer=result,
+                    debug={"agent": "services.agent.chat"},
+                )
+            if isinstance(result, dict):
+                return ChatResponse(
+                    ok=bool(result.get("ok", True)),
+                    answer=result.get("answer") or "",
+                    items=result.get("items") or [],
+                    debug={"agent": "services.agent.chat", **(result.get("debug") or {})},
+                )
+        except FuturesTimeout:
+            logger.warning("services.agent.chat timed out for user %s", req.user_id)
+        except Exception as exc:
+            logger.exception("services.agent.chat error for user %s: %r", req.user_id, exc)
 
-    # 3) Fallback agent
+    # 3) Final fallback – simple, bounded, never hangs
     return _fallback_agent(req)
 
 
