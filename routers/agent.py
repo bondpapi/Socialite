@@ -1,36 +1,40 @@
 from __future__ import annotations
 
-import re
-from typing import Optional, Dict, Any, List
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# --- optional dependencies ---
+# ---------- Optional integrations ----------
+
 _services_agent = None
 _root_agent = None
-_agg_sync = None
+_agg_async = None
 
 try:
-    from services import agent as _services_agent  # legacy text-only agent (optional)
-except Exception:
-    _services_agent = None
-
-try:
-    import agent as _root_agent  # root LLM agent in project root
+    # root-level agent.py (LLM + tools)
+    import agent as _root_agent  # type: ignore[assignment]
 except Exception:
     _root_agent = None
 
 try:
-    from services.aggregator import search_events_sync as _agg_sync
+    # legacy services agent (string-in / string-out)
+    from services import agent as _services_agent  # type: ignore[assignment]
 except Exception:
-    _agg_sync = None
+    _services_agent = None
 
+try:
+    # async search API from aggregator
+    from services.aggregator import search_events as _agg_async  # type: ignore[assignment]
+except Exception:
+    _agg_async = None
 
 # ---------- Models ----------
+
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -60,190 +64,187 @@ class DigestResponse(BaseModel):
     generated_at: Optional[str] = None
 
 
-_EVENT_KEYWORDS = (
-    "event", "events",
-    "concert", "concerts",
-    "show", "shows",
-    "music",
-    "sport", "sports",
-    "festival", "festivals",
-    "party", "parties",
-)
+# ---------- Async fallback agent (no LLM, just aggregator) ----------
 
-# ---------- helpers ----------
-
-
-def _run_aggregator_in_thread(
-    *,
-    city: str,
-    country: str,
-    days_ahead: int = 30,
-    start_in_days: int = 0,
-    include_mock: bool = True,
-    query: Optional[str] = None,
-) -> Dict[str, Any]:
+async def _fallback_agent(req: ChatRequest) -> ChatResponse:
     """
-    Safe wrapper around services.aggregator.search_events_sync.
-
-    Runs it in a background thread so its internal asyncio.run() does NOT
-    conflict with FastAPI's event loop.
+    Simple async fallback when the LLM agent is unavailable or times out.
+    Uses the aggregator directly if possible.
     """
-    if _agg_sync is None:
-        return {
-            "count": 0,
-            "items": [],
-            "debug": {"reason": "aggregator_unavailable"},
-        }
+    msg = (req.message or "").lower()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            _agg_sync,
-            city=city,
-            country=country,
-            days_ahead=days_ahead,
-            start_in_days=start_in_days,
-            include_mock=include_mock,
-            query=query,
+    wants_events = any(
+        w in msg for w in ["event", "concert", "show", "music", "sports", "festival"]
+    )
+
+    # If the user isn't obviously asking for events, just respond generically.
+    if not wants_events or _agg_async is None:
+        return ChatResponse(
+            ok=False,
+            answer=(
+                "I can help you find events and activities! "
+                "Try asking something like “concerts this weekend in Vilnius” "
+                "or use the Discover tab to browse events."
+            ),
+            items=[],
+            debug={"fallback": True, "source": "generic"},
         )
-        try:
-            result = future.result(timeout=25) or {}
-            dbg = result.get("debug") or {}
-            dbg["via"] = "thread_wrapper"
-            result["debug"] = dbg
-            return result
-        except FuturesTimeout:
-            return {
-                "count": 0,
-                "items": [],
-                "debug": {"reason": "aggregator_timeout"},
-            }
-        except Exception as e:
-            return {
-                "count": 0,
-                "items": [],
-                "debug": {"reason": "aggregator_error", "error": str(e)},
-            }
 
+    city = req.city or "Vilnius"
+    country = (req.country or "LT").upper()
 
-def _fallback_agent(req: ChatRequest, *, extra_debug: Optional[Dict[str, Any]] = None) -> ChatResponse:
-    """
-    Simple fallback when the LLM agent is unavailable or times out.
-    Uses the aggregator (via thread wrapper) when the message looks
-    event-related; otherwise returns a generic helper message.
-    """
-    msg = req.message.lower()
-    debug: Dict[str, Any] = {"fallback": True}
-    if extra_debug:
-        debug.update(extra_debug)
-
-    # If it looks like an events query, try the aggregator.
-    if any(k in msg for k in _EVENT_KEYWORDS):
-        city = (req.city or "Vilnius").strip() or "Vilnius"
-        country = (req.country or "LT").strip() or "LT"
-
-        data = _run_aggregator_in_thread(
+    try:
+        # Use a modest window so it stays fast
+        result = await _agg_async(
             city=city,
             country=country,
             days_ahead=30,
             start_in_days=0,
             include_mock=True,
-            query=None,
+            limit=20,
+            offset=0,
         )
+        items = (result or {}).get("items") or []
+        items = items[:5]  # show only top 5 in chat
 
-        items = (data.get("items") or [])[:5]
-        count = len(items)
+        if items:
+            return ChatResponse(
+                ok=True,
+                answer=f"I found {len(items)} events in {city}. Here are some options:",
+                items=items,
+                debug={
+                    "fallback": True,
+                    "source": "aggregator",
+                    "city": city,
+                    "country": country,
+                },
+            )
+        else:
+            return ChatResponse(
+                ok=False,
+                answer=(
+                    f"I couldn't find any events in {city} right now. "
+                    "Try widening your search or check back later."
+                ),
+                items=[],
+                debug={
+                    "fallback": True,
+                    "source": "aggregator",
+                    "city": city,
+                    "country": country,
+                },
+            )
 
-        debug.update(data.get("debug") or {})
-        debug.update(
-            {
-                "source": "aggregator",
+    except Exception as e:
+        return ChatResponse(
+            ok=False,
+            answer="I'm having trouble searching for events right now. Please try again later.",
+            items=[],
+            debug={
+                "fallback": True,
+                "source": "aggregator_error",
+                "error": str(e),
                 "city": city,
                 "country": country,
-            }
+            },
         )
 
-        if count:
-            answer = f"I found {count} events in {city}. Here are some options:"
-            return ChatResponse(ok=True, answer=answer, items=items, debug=debug)
-        else:
-            answer = (
-                f"I couldn't find any events in {city} right now. "
-                f"Try widening your search or check back later."
-            )
-            return ChatResponse(ok=False, answer=answer, items=[], debug=debug)
 
-    # Otherwise, generic guidance.
-    debug["source"] = "generic"
-    answer = (
-        "I can help you find events and activities! "
-        "Try asking something like “concerts this weekend in Vilnius” "
-        "or use the Discover tab to browse events."
-    )
-    return ChatResponse(ok=True, answer=answer, items=[], debug=debug)
-
-
-# ---------- Routes ----------
+# ---------- Main chat route ----------
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     """
-    Chat with the Socialite agent. Tries, in order:
-    1) root LLM agent (agent.py in project root)
-    2) legacy services.agent (if present)
-    3) simple fallback that calls the aggregator in a thread
+    Chat with the Socialite agent.
+
+    Order of preference:
+    1. Root LLM agent (agent.py) with tools.
+    2. Legacy services agent (if present).
+    3. Async fallback that calls the aggregator directly.
     """
-    root_debug: Dict[str, Any] = {}
-
-    # 1) Root LLM agent (agent.py)
+    # 1) Try root LLM agent if available
     if _root_agent is not None:
+        loop = asyncio.get_running_loop()
+
+        def _run_root_agent() -> Dict[str, Any]:
+            # Call the root agent in a worker thread (blocking, no event-loop issues)
+            return _root_agent.chat(
+                user_id=req.user_id,
+                message=req.message,
+                username=req.username,
+                city=req.city,
+                country=req.country,
+            )
+
         try:
+            # run_in_executor + asyncio.wait_for instead of future.result(timeout=…)
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    _root_agent.chat,
-                    user_id=req.user_id,
-                    message=req.message,
-                    username=req.username,
-                    city=req.city,
-                    country=req.country,
-                )
-                result = future.result(timeout=45)
-        except FuturesTimeout:
-            root_debug["root_agent_timeout"] = True
-        except Exception as e:
-            root_debug["root_agent_error"] = str(e)
-        else:
+                future = loop.run_in_executor(executor, _run_root_agent)
+                result = await asyncio.wait_for(future, timeout=45.0)
+
             if isinstance(result, dict):
-                # Normalise the structure a bit
-                answer = result.get("answer") or "Here's what I found."
-                items = result.get("items") or []
-                dbg = result.get("debug") or {}
-                dbg.update(root_debug)
-                dbg["source"] = "root_agent"
-                ok = result.get("ok", True)
-                return ChatResponse(ok=ok, answer=answer, items=items, debug=dbg)
+                # Normal success from LLM agent
+                return ChatResponse(
+                    ok=bool(result.get("ok", True)),
+                    answer=result.get(
+                        "answer",
+                        "I couldn't find any events right now. Try widening your search or check back later.",
+                    ),
+                    items=result.get("items") or [],
+                    debug={
+                        "source": "root_agent",
+                        "used_tools": result.get("used_tools", []),
+                    },
+                )
 
-    # 2) Legacy text-only services.agent (optional)
+        except asyncio.TimeoutError:
+            # Root agent is too slow → fall back to direct aggregator
+            return await _fallback_agent(
+                req.copy(
+                    update={
+                        # note the timeout in debug
+                        "message": req.message,
+                    }
+                )
+            )
+        except Exception as e:
+            # Any other error → fall back as well
+            return await _fallback_agent(
+                req.copy(
+                    update={
+                        "message": req.message,
+                    }
+                )
+            )
+
+    # 2) Legacy services agent (string in → string out)
     if _services_agent is not None:
+        loop = asyncio.get_running_loop()
+
+        def _run_services_agent() -> str:
+            return _services_agent(req.message, req.user_id)  # type: ignore[misc]
+
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    _services_agent,
-                    req.message,
-                    req.user_id,
-                )
-                text = future.result(timeout=20)
-        except FuturesTimeout:
-            root_debug["services_agent_timeout"] = True
-        except Exception as e:
-            root_debug["services_agent_error"] = str(e)
-        else:
-            dbg = {"source": "services_agent"}
-            dbg.update(root_debug)
-            return ChatResponse(ok=True, answer=text, items=[], debug=dbg)
+                future = loop.run_in_executor(executor, _run_services_agent)
+                text = await asyncio.wait_for(future, timeout=30.0)
+            return ChatResponse(
+                ok=True,
+                answer=text,
+                items=[],
+                debug={"source": "services_agent"},
+            )
+        except (asyncio.TimeoutError, FuturesTimeout):
+            return await _fallback_agent(req)
+        except Exception:
+            return await _fallback_agent(req)
 
-    # 3) Fallback using aggregator (via thread wrapper)
-    return _fallback_agent(req, extra_debug=root_debug)
+    # 3) Pure fallback
+    return await _fallback_agent(req)
+
+
+# ---------- Subscriptions & digest (still placeholder) ----------
 
 
 @router.post("/subscribe")
@@ -283,6 +284,6 @@ async def agent_status() -> Dict[str, Any]:
     return {
         "services_agent_available": _services_agent is not None,
         "root_agent_available": _root_agent is not None,
-        "aggregator_available": _agg_sync is not None,
+        "aggregator_available": _agg_async is not None,
         "fallback_enabled": True,
     }
