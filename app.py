@@ -7,8 +7,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import streamlit as st
 
+# =========================
 # Config
-
+# =========================
 API = os.getenv("SOCIALITE_API",
                 "https://socialite-7wkx.onrender.com").rstrip("/")
 
@@ -22,7 +23,9 @@ if "user_id" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = "demo"
 
+# =========================
 # HTTP helpers (with retries + sidebar diagnostics)
+# =========================
 _session = requests.Session()
 _retry = Retry(
     total=3, connect=3, read=3, backoff_factor=0.5,
@@ -32,10 +35,6 @@ _retry = Retry(
 _session.mount("https://", HTTPAdapter(max_retries=_retry))
 _session.mount("http://", HTTPAdapter(max_retries=_retry))
 
-# single expander instance used by helper to avoid creating
-# a new expander on every request
-SIDEBAR_EXPANDER = st.sidebar.expander("API Status", expanded=False)
-
 
 def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     url = f"{API}{path}"
@@ -43,15 +42,10 @@ def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs) -> Union[D
     try:
         r = _session.request(method, url, timeout=timeout, **kwargs)
         elapsed = round((time.time() - t0) * 1000)
-        # update expander with a brief status line
-        SIDEBAR_EXPANDER.caption(
-            f"{method} {path} → {r.status_code} ({elapsed}ms)")
         r.raise_for_status()
         return r.json()
     except Exception as e:
         elapsed = round((time.time() - t0) * 1000)
-        SIDEBAR_EXPANDER.error(
-            f"{method} {path} failed ({elapsed}ms): {str(e)[:120]}")
         return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
 
 
@@ -66,37 +60,24 @@ def _post(path: str, payload: Dict[str, Any], *, timeout: int = 30) -> Union[Dic
 def _delete(path: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return _req_json("DELETE", path)
 
-
-# Quick root ping (shows up in the sidebar expander above)
-ping_result = _get("/")
-SIDEBAR_EXPANDER.caption(f"Base: `{API}`")
-if isinstance(ping_result, dict) and ping_result.get("ok"):
-    SIDEBAR_EXPANDER.success("Connected ✅")
-else:
-    SIDEBAR_EXPANDER.error("Connection failed")
-
+# =========================
 # Profile helpers
+# =========================
 
 
 def load_profile(uid: str) -> Dict[str, Any]:
     res = _get(f"/profile/{uid}")
-    # expected shape: {"ok": True, "profile": {...}}
     if isinstance(res, dict) and res.get("profile"):
         return res["profile"]
-    # graceful default
     return {"user_id": uid, "username": st.session_state.username}
 
 
 def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    # API expects POST /profile (body contains user_id)
     return _post("/profile", p)
 
 
 def _coerce_country(value) -> str:
-    """
-    Accepts 'LT', 'lt', {'code':'LT'}, {'countryCode':'LT'}, {'name':'Lithuania'}, etc.
-    Returns a best-effort ISO-2 uppercase string or ''.
-    """
+    """Convert various country formats to ISO-2 uppercase string."""
     if isinstance(value, str):
         return value.strip().upper()[:2]
     if isinstance(value, dict):
@@ -104,7 +85,6 @@ def _coerce_country(value) -> str:
             v = value.get(k)
             if v:
                 return str(v).strip().upper()[:2]
-        # last resort: take the first two letters of the name
         name = value.get("name")
         if name:
             return str(name).strip().upper()[:2]
@@ -115,7 +95,6 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
     city = (p.get("city") or "").strip().title()
     country = _coerce_country(p.get("country"))
 
-    # only block when we truly have nothing usable
     if not city or not country:
         return {
             "count": 0,
@@ -128,84 +107,59 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
             },
         }
 
-    # slightly smaller default window helps keep responses snappy
     days_ahead = int(p.get("days_ahead") or 90)
     start_in_days = int(p.get("start_in_days") or 0)
 
-    params: Dict[str, Any] = {
+    params = {
         "city": city,
         "country": country,
         "days_ahead": days_ahead,
         "start_in_days": start_in_days,
         "include_mock": bool(include_mock),
-        "limit": 20,  # keep payloads small to avoid UI timeouts
+        "limit": 20,
     }
+
     q = (p.get("keywords") or "").strip()
     if q:
         params["query"] = q
 
-    # ---- single-shot GET (no retry) with longer timeout ----
-    url = f"{API}/events/search"
-    t0 = time.time()
-    try:
-        r = requests.get(url, params=params, timeout=60)
-        elapsed_ms = int((time.time() - t0) * 1000)
-        r.raise_for_status()
-        result = r.json()
-    except Exception as e:
-        elapsed_ms = int((time.time() - t0) * 1000)
-        return {
-            "count": 0,
-            "items": [],
-            "debug": {
-                "reason": "no_response",
-                "error": str(e),
-                "sent_params": params,
-                "url": url,
-                "elapsed_ms": elapsed_ms,
-            },
-        }
-    # --------------------------------------------------------
+    # Use no-retry for heavy search endpoints
+    result = _get_noretry("/events/search", timeout=60, **params)
 
     if not isinstance(result, dict):
         return {
             "count": 0,
             "items": [],
-            "debug": {"reason": "no_response", "sent_params": params, "url": url},
+            "debug": {"reason": "invalid_response", "sent_params": params},
         }
 
-    # normalize count so the UI logic is consistent
     items = result.get("items") or []
-    normalized_count = int(result.get("count") or result.get("total") or len(items))
+    normalized_count = int(result.get(
+        "count") or result.get("total") or len(items))
     result["count"] = normalized_count
 
-    # include what we actually asked the API for easier debugging
     dbg = result.get("debug") or {}
     dbg["sent_params"] = params
     result["debug"] = dbg
     return result
 
 
-# --- no-retry helper for heavy endpoints ---
 def _get_noretry(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
+    """Direct GET without retry logic for heavy endpoints."""
     url = f"{API}{path}"
     t0 = time.time()
     try:
-        # use a fresh requests call (bypasses the Session with retries)
         r = requests.get(url, params=params, timeout=timeout)
         elapsed = round((time.time() - t0) * 1000)
-        if st.sidebar:
-            st.sidebar.caption(f"GET (no-retry) {path} → {r.status_code} ({elapsed}ms)")
         r.raise_for_status()
         return r.json()
     except Exception as e:
         elapsed = round((time.time() - t0) * 1000)
-        if st.sidebar:
-            st.sidebar.error(f"GET (no-retry) {path} failed ({elapsed}ms): {str(e)[:80]}")
         return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
 
-
+# =========================
 # UI components
+# =========================
 
 
 def event_card(e: Dict[str, Any], key: str, user_id: str):
@@ -243,24 +197,31 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
         with c2:
             if st.button("💾 Save", key=f"save_{key}"):
                 r = _post("/saved", {"user_id": user_id, "event": e})
-                st.success("Saved!") if r.get(
-                    "ok") else st.error("Save failed")
+                if r.get("ok"):
+                    st.success("Saved!")
+                else:
+                    st.error("Save failed")
         with c3:
             if e.get("min_price") is not None:
-                st.write(
-                    f"💰 From {e['min_price']} {(e.get('currency') or '').strip()}")
+                currency = e.get("currency") or ""
+                st.write(f"💰 From {e['min_price']} {currency}".strip())
 
         st.divider()
 
+
+# =========================
 # Main App
-
-
+# =========================
+# Sidebar API status
 with st.sidebar.expander("API Status", expanded=False):
     st.caption(f"Base: `{API}`")
     ping_result = _get("/")
-    st.success("Connected ✅" if ping_result.get("ok") else "Connection failed")
+    if ping_result.get("ok"):
+        st.success("Connected ✅")
+    else:
+        st.error("Connection failed")
 
-    if st.button("Run search smoke test"):
+    if st.button("Run search test"):
         demo = _get(
             "/events/search",
             city="Vilnius", country="LT",
@@ -268,7 +229,6 @@ with st.sidebar.expander("API Status", expanded=False):
             include_mock=False
         )
         st.json(demo)
-
 
 tabs = st.tabs(["🏠 Discover", "💬 Chat", "⚙️ Settings"])
 
@@ -292,7 +252,6 @@ with tabs[2]:
                 "Home City", value=prof.get("city") or "Vilnius")
             country_in = st.text_input(
                 "Country (ISO-2)", value=(prof.get("country") or "LT"))
-            # coerce after widget returns to avoid funky first-render issues
             country_iso2 = (country_in or "").strip().upper()[:2]
 
         c3, c4 = st.columns(2)
@@ -313,8 +272,7 @@ with tabs[2]:
             include_mock_flag = st.checkbox(
                 "Include mock data (for testing)", value=False)
 
-        submitted = st.form_submit_button("💾 Save Settings", type="primary")
-        if submitted:
+        if st.form_submit_button("💾 Save Settings", type="primary"):
             passions = [p.strip()
                         for p in passions_text.split(",") if p.strip()]
             payload = {
@@ -365,7 +323,7 @@ with tabs[0]:
             with st.spinner("🔍 Finding events..."):
                 res = search_from_profile(prof, include_mock_feed)
 
-            items: List[Dict[str, Any]] = list(res.get("items") or [])
+            items = list(res.get("items") or [])
             if not items:
                 st.info(
                     "No events matched your Settings. Try widening the date window or clearing keywords.")
@@ -373,7 +331,7 @@ with tabs[0]:
                     with st.expander("Diagnostics"):
                         st.json(res["debug"])
             else:
-                # sort by simple passion relevance
+                # Sort by passion relevance
                 passions = {p.lower() for p in (prof.get("passions") or [])}
 
                 def score(ev: Dict[str, Any]) -> int:
@@ -386,6 +344,7 @@ with tabs[0]:
                         if p in c:
                             s += 2
                     return s
+
                 items.sort(key=score, reverse=True)
                 for i, ev in enumerate(items):
                     event_card(
@@ -394,32 +353,97 @@ with tabs[0]:
 # ---------- CHAT ----------
 with tabs[1]:
     st.header("💬 Chat with Socialite")
-    prof = load_profile(st.session_state.user_id)
+    st.caption(
+        "Ask me about events, get recommendations, or plan your activities!")
 
-    msg = st.text_input("💭 What are you looking for?",
-                        placeholder="e.g., 'concerts this weekend in my city'")
-    if st.button("📤 Send", type="primary") and msg:
-        payload = {
+    profile = load_profile(st.session_state.user_id)
+    message = st.text_input(
+        "💭 What are you looking for?",
+        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'",
+    )
+
+    if st.button("📤 Send", type="primary") and message:
+        chat_payload = {
             "user_id": st.session_state.user_id,
             "username": st.session_state.username,
-            "message": msg,
-            "city": prof.get("city"),
-            "country": prof.get("country"),
+            "message": message,
+            "city": profile.get("city"),
+            "country": profile.get("country"),
         }
-        with st.spinner("🤔 Thinking..."):
-            res = _post("/agent/chat", payload, timeout=60)
 
-        if res.get("error"):
-            st.error(f"❌ Chat failed: {res['error']}")
+        with st.spinner("🤔 Thinking..."):
+            response = _post("/agent/chat", chat_payload, timeout=20)
+
+        if response.get("error"):
+            st.warning(
+                "The AI agent had trouble replying. Falling back to a direct event search instead."
+            )
+            try:
+                fallback_result = search_from_profile(
+                    profile, include_mock=False)
+                items = fallback_result.get("items", [])
+                if not items:
+                    st.info(
+                        "I couldn't find any events. Try adjusting your settings or date range.")
+                else:
+                    st.markdown("### 🎯 Events I could find right now")
+                    for idx, event in enumerate(items[:10]):
+                        event_card(
+                            event,
+                            key=f"chat_fallback_{idx}_{event.get('title', '')[:20]}",
+                            user_id=st.session_state.user_id,
+                        )
+            except Exception as e:
+                st.error(f"❌ Fallback search also failed: {e}")
         else:
-            st.markdown(
-                f"**Socialite**: {res.get('answer') or 'I couldn’t find anything for that.'}")
-            picks = res.get("items") or []
-            if picks:
-                st.markdown("### 🎯 Picks")
-                for i, ev in enumerate(picks[:5]):
+            answer = response.get(
+                "answer") or "I'm not sure how to help with that."
+            st.markdown(f"🤖 **Socialite**: {answer}")
+
+            events = response.get("items") or []
+            if events:
+                st.markdown("### 🎯 Recommended Events")
+                for idx, event in enumerate(events[:5]):
                     event_card(
-                        ev, key=f"chat_{i}_{ev.get('title', '')[:24]}", user_id=st.session_state.user_id)
+                        event,
+                        key=f"chat_{idx}_{event.get('title', '')[:20]}",
+                        user_id=st.session_state.user_id,
+                    )
+
+    # Subscription section
+    st.divider()
+    st.subheader("📬 Subscriptions")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("📅 Subscribe Weekly"):
+            sub_payload = {
+                "user_id": st.session_state.user_id,
+                "city": profile.get("city"),
+                "country": profile.get("country"),
+                "cadence": "WEEKLY",
+                "keywords": profile.get("passions") or [],
+            }
+            result = _post("/agent/subscribe", sub_payload)
+            if result.get("ok"):
+                st.success("✅ Subscribed!")
+            else:
+                st.info(
+                    f"ℹ️ {result.get('hint', 'Subscription feature coming soon!')}")
+
+    with col2:
+        if st.button("📧 Get Latest Digest"):
+            digest_result = _get(f"/agent/digest/{st.session_state.user_id}")
+            digest = digest_result.get("digest", [])
+            if digest:
+                with st.expander("📰 Latest Digest", expanded=True):
+                    for item in digest:
+                        st.markdown(f"**{item.get('title', 'Event')}**")
+                        if item.get("note"):
+                            st.write(item["note"])
+                        st.divider()
+            else:
+                st.info("📭 No digest available yet.")
 
 # Footer
 st.divider()
