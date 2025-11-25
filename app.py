@@ -24,7 +24,7 @@ if "username" not in st.session_state:
     st.session_state.username = "demo"
 
 # =========================
-# HTTP helpers (with retries + sidebar diagnostics)
+# HTTP helpers (with retries)
 # =========================
 _session = requests.Session()
 _retry = Retry(
@@ -92,7 +92,7 @@ def _coerce_country(value) -> str:
 
 
 def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
-    city = (p.get("city") or "").strip().title()
+    city = (p.get("city") or "").strip()
     country = _coerce_country(p.get("country"))
 
     if not city or not country:
@@ -123,8 +123,8 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
     if q:
         params["query"] = q
 
-    # Use no-retry for heavy search endpoints
-    result = _get_noretry("/events/search", timeout=60, **params)
+    # Use direct request for search endpoints
+    result = _get_direct("/events/search", timeout=60, **params)
 
     if not isinstance(result, dict):
         return {
@@ -144,18 +144,15 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
     return result
 
 
-def _get_noretry(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
+def _get_direct(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
     """Direct GET without retry logic for heavy endpoints."""
     url = f"{API}{path}"
-    t0 = time.time()
     try:
         r = requests.get(url, params=params, timeout=timeout)
-        elapsed = round((time.time() - t0) * 1000)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        elapsed = round((time.time() - t0) * 1000)
-        return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
+        return {"ok": False, "error": str(e), "debug": {"url": url}}
 
 # =========================
 # UI components
@@ -181,7 +178,7 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
             st.caption(" • ".join(chips))
 
         desc = e.get("description")
-        if desc and desc != "Event":
+        if desc and desc != "Event" and len(desc.strip()) > 3:
             st.text(desc[:200] + ("..." if len(desc) > 200 else ""))
 
         if e.get("image_url"):
@@ -197,14 +194,15 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
         with c2:
             if st.button("💾 Save", key=f"save_{key}"):
                 r = _post("/saved", {"user_id": user_id, "event": e})
-                if r.get("ok"):
+                if isinstance(r, dict) and r.get("ok"):
                     st.success("Saved!")
                 else:
                     st.error("Save failed")
         with c3:
-            if e.get("min_price") is not None:
+            price = e.get("min_price")
+            if price is not None:
                 currency = e.get("currency") or ""
-                st.write(f"💰 From {e['min_price']} {currency}".strip())
+                st.write(f"💰 From {price} {currency}".strip())
 
         st.divider()
 
@@ -216,7 +214,7 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
 with st.sidebar.expander("API Status", expanded=False):
     st.caption(f"Base: `{API}`")
     ping_result = _get("/")
-    if ping_result.get("ok"):
+    if isinstance(ping_result, dict) and ping_result.get("ok"):
         st.success("Connected ✅")
     else:
         st.error("Connection failed")
@@ -226,7 +224,7 @@ with st.sidebar.expander("API Status", expanded=False):
             "/events/search",
             city="Vilnius", country="LT",
             days_ahead=120, start_in_days=0,
-            include_mock=False
+            include_mock=True
         )
         st.json(demo)
 
@@ -252,7 +250,6 @@ with tabs[2]:
                 "Home City", value=prof.get("city") or "Vilnius")
             country_in = st.text_input(
                 "Country (ISO-2)", value=(prof.get("country") or "LT"))
-            country_iso2 = (country_in or "").strip().upper()[:2]
 
         c3, c4 = st.columns(2)
         with c3:
@@ -268,31 +265,32 @@ with tabs[2]:
             passions_text = st.text_area(
                 "Passions / interests", value=", ".join(prof.get("passions") or []))
 
-        with st.expander("Advanced"):
-            include_mock_flag = st.checkbox(
-                "Include mock data (for testing)", value=False)
-
         if st.form_submit_button("💾 Save Settings", type="primary"):
             passions = [p.strip()
                         for p in passions_text.split(",") if p.strip()]
+            country_iso2 = (country_in or "").strip().upper()[:2]
+
             payload = {
                 "user_id": user_id.strip() or st.session_state.user_id,
                 "username": username.strip() or st.session_state.username,
-                "city": home_city.strip().title(),
+                "city": home_city.strip(),
                 "country": country_iso2,
                 "days_ahead": int(days_ahead),
                 "start_in_days": int(start_in_days),
-                "keywords": (keywords.strip() or None),
+                "keywords": keywords.strip() or None,
                 "passions": passions,
             }
+
             r = save_profile(payload)
-            if r.get("ok"):
+            if isinstance(r, dict) and r.get("ok"):
                 st.success("Saved ✅")
                 st.session_state.user_id = payload["user_id"]
                 st.session_state.username = payload["username"]
                 st.rerun()
             else:
-                st.error(f"Save failed: {r.get('error') or 'unknown error'}")
+                error_msg = r.get("error") if isinstance(
+                    r, dict) else "Unknown error"
+                st.error(f"Save failed: {error_msg}")
 
 # ---------- DISCOVER ----------
 with tabs[0]:
@@ -350,23 +348,20 @@ with tabs[0]:
                     event_card(
                         ev, key=f"discover_{i}_{ev.get('title', '')[:24]}", user_id=st.session_state.user_id)
 
-# ---------- CHAT TAB ----------
+# ---------- CHAT ----------
 with tabs[1]:
     st.header("💬 Chat with Socialite")
     st.caption(
-        "Ask me about events, get recommendations, or plan your activities!"
-    )
+        "Ask me about events, get recommendations, or plan your activities!")
 
-    # Load profile for context (city / country / passions)
     profile = load_profile(st.session_state.user_id)
 
     message = st.text_input(
         "💭 What are you looking for?",
-        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'",
+        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'"
     )
 
     if st.button("📤 Send", type="primary") and message:
-        # Payload for the backend agent
         chat_payload = {
             "user_id": st.session_state.user_id,
             "username": st.session_state.username,
@@ -375,69 +370,50 @@ with tabs[1]:
             "country": profile.get("country"),
         }
 
-        # ---- 1) Try agent with a shorter timeout ----
-        with st.spinner("🤔 Thinking..."):
-            # shorter timeout than default, so we don't hang for 60s
-            response = _post("/agent/chat", chat_payload, timeout=20)
+        with st.spinner("🤔 Talking to the AI agent..."):
+            response = _post("/agent/chat", chat_payload, timeout=25)
 
-        if response.get("error"):
-            # Agent call failed from the Streamlit side (timeout / network, etc.)
+        # Handle network/HTTP failure
+        if isinstance(response, dict) and response.get("error"):
             st.warning(
                 "The AI agent had trouble replying (network or timeout issue). "
                 "Falling back to a direct event search instead."
             )
 
-            # ---- 2) Fallback: call /events/search directly ----
-            try:
-                fallback_result = search_from_profile(profile, include_mock=False)
-            except Exception as e:
-                st.error(f"❌ Fallback search also failed: {e}")
-            else:
-                items = fallback_result.get("items", [])
-                if not items:
-                    st.info(
-                        "I still couldn’t find any events. Try adjusting your settings or date range."
-                    )
-                else:
-                    st.markdown("### 🎯 Events I could find right now")
-                    for idx, event in enumerate(items[:10]):  # cap a bit for chat
-                        event_card(
-                            event,
-                            key=f"chat_fallback_{idx}_{event.get('title', '')[:20]}",
-                            user_id=st.session_state.user_id,
-                        )
+            with st.spinner("🔍 Searching events directly..."):
+                search_result = search_from_profile(
+                    profile, include_mock=False)
 
-                    # Optional: show a tiny bit of debug so you know what's happening
-                    with st.expander("🔧 Agent debug"):
-                        st.json(
-                            {
-                                "agent_error": response.get("error"),
-                                "agent_debug": response.get("debug"),
-                                "fallback_used": True,
-                            }
-                        )
-
-        else:
-            # Agent call succeeded
-            answer = response.get("answer") or "I'm not sure how to help with that."
-            st.markdown(f"🤖 **Socialite**: {answer}")
-
-            events = response.get("items") or []
-            if events:
-                st.markdown("### 🎯 Recommended Events")
-                for idx, event in enumerate(events[:5]):  # Limit to 5 events
+            items = search_result.get("items", [])
+            if items:
+                st.success(f"I found {len(items)} events for you:")
+                for idx, event in enumerate(items[:5]):
                     event_card(
                         event,
-                        key=f"chat_{idx}_{event.get('title', '')[:20]}",
+                        key=f"chat_fallback_{idx}_{event.get('title', '')[:20]}",
                         user_id=st.session_state.user_id,
                     )
+            else:
+                st.info(
+                    "I couldn't find any events. Try adjusting your settings or date range.")
 
-            # Optional: expose agent debug info if you want to inspect tools, etc.
-            debug = response.get("debug") or {}
-            if debug:
-                with st.expander("🔧 Agent debug"):
-                    st.json(debug)
+        # Agent responded successfully
+        elif isinstance(response, dict):
+            answer = response.get("answer", "").strip(
+            ) or "I'm not sure how to help with that."
+            st.markdown(f"🤖 **Socialite**: {answer}")
 
+            events = response.get("items", [])
+            if events:
+                st.markdown("### 🎯 Recommended Events")
+                for idx, event in enumerate(events[:5]):
+                    event_card(
+                        event,
+                        key=f"chat_agent_{idx}_{event.get('title', '')[:20]}",
+                        user_id=st.session_state.user_id,
+                    )
+        else:
+            st.error("Unexpected response format from agent.")
 
     # Subscription section
     st.divider()
@@ -454,16 +430,18 @@ with tabs[1]:
                 "keywords": profile.get("passions") or [],
             }
             result = _post("/agent/subscribe", sub_payload)
-            if result.get("ok"):
+            if isinstance(result, dict) and result.get("ok"):
                 st.success("✅ Subscribed!")
             else:
-                st.info(
-                    f"ℹ️ {result.get('hint', 'Subscription feature coming soon!')}")
+                hint = result.get("hint") if isinstance(
+                    result, dict) else "Subscription feature coming soon!"
+                st.info(f"{hint}")
 
     with col2:
         if st.button("📧 Get Latest Digest"):
             digest_result = _get(f"/agent/digest/{st.session_state.user_id}")
-            digest = digest_result.get("digest", [])
+            digest = digest_result.get("digest", []) if isinstance(
+                digest_result, dict) else []
             if digest:
                 with st.expander("📰 Latest Digest", expanded=True):
                     for item in digest:
