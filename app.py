@@ -350,19 +350,23 @@ with tabs[0]:
                     event_card(
                         ev, key=f"discover_{i}_{ev.get('title', '')[:24]}", user_id=st.session_state.user_id)
 
-# ---------- CHAT ----------
+# ---------- CHAT TAB ----------
 with tabs[1]:
     st.header("💬 Chat with Socialite")
     st.caption(
-        "Ask me about events, get recommendations, or plan your activities!")
+        "Ask me about events, get recommendations, or plan your activities!"
+    )
 
+    # Load profile for context (city / country / passions)
     profile = load_profile(st.session_state.user_id)
+
     message = st.text_input(
         "💭 What are you looking for?",
         placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'",
     )
 
     if st.button("📤 Send", type="primary") and message:
+        # Payload for the backend agent
         chat_payload = {
             "user_id": st.session_state.user_id,
             "username": st.session_state.username,
@@ -371,44 +375,69 @@ with tabs[1]:
             "country": profile.get("country"),
         }
 
+        # ---- 1) Try agent with a shorter timeout ----
         with st.spinner("🤔 Thinking..."):
+            # shorter timeout than default, so we don't hang for 60s
             response = _post("/agent/chat", chat_payload, timeout=20)
 
         if response.get("error"):
+            # Agent call failed from the Streamlit side (timeout / network, etc.)
             st.warning(
-                "The AI agent had trouble replying. Falling back to a direct event search instead."
+                "The AI agent had trouble replying (network or timeout issue). "
+                "Falling back to a direct event search instead."
             )
+
+            # ---- 2) Fallback: call /events/search directly ----
             try:
-                fallback_result = search_from_profile(
-                    profile, include_mock=False)
+                fallback_result = search_from_profile(profile, include_mock=False)
+            except Exception as e:
+                st.error(f"❌ Fallback search also failed: {e}")
+            else:
                 items = fallback_result.get("items", [])
                 if not items:
                     st.info(
-                        "I couldn't find any events. Try adjusting your settings or date range.")
+                        "I still couldn’t find any events. Try adjusting your settings or date range."
+                    )
                 else:
                     st.markdown("### 🎯 Events I could find right now")
-                    for idx, event in enumerate(items[:10]):
+                    for idx, event in enumerate(items[:10]):  # cap a bit for chat
                         event_card(
                             event,
                             key=f"chat_fallback_{idx}_{event.get('title', '')[:20]}",
                             user_id=st.session_state.user_id,
                         )
-            except Exception as e:
-                st.error(f"❌ Fallback search also failed: {e}")
+
+                    # Optional: show a tiny bit of debug so you know what's happening
+                    with st.expander("🔧 Agent debug"):
+                        st.json(
+                            {
+                                "agent_error": response.get("error"),
+                                "agent_debug": response.get("debug"),
+                                "fallback_used": True,
+                            }
+                        )
+
         else:
-            answer = response.get(
-                "answer") or "I'm not sure how to help with that."
+            # Agent call succeeded
+            answer = response.get("answer") or "I'm not sure how to help with that."
             st.markdown(f"🤖 **Socialite**: {answer}")
 
             events = response.get("items") or []
             if events:
                 st.markdown("### 🎯 Recommended Events")
-                for idx, event in enumerate(events[:5]):
+                for idx, event in enumerate(events[:5]):  # Limit to 5 events
                     event_card(
                         event,
                         key=f"chat_{idx}_{event.get('title', '')[:20]}",
                         user_id=st.session_state.user_id,
                     )
+
+            # Optional: expose agent debug info if you want to inspect tools, etc.
+            debug = response.get("debug") or {}
+            if debug:
+                with st.expander("🔧 Agent debug"):
+                    st.json(debug)
+
 
     # Subscription section
     st.divider()
