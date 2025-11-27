@@ -439,6 +439,16 @@ async def search_events(
     )
 
 
+def _run_coro_in_new_loop(coro: asyncio.Future) -> Dict[str, Any]:
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
 def search_events_sync(
     *,
     city: str,
@@ -450,18 +460,34 @@ def search_events_sync(
     limit: int = 50,
     offset: int = 0,
 ) -> Dict[str, Any]:
-    return asyncio.run(
-        _search_events_async(
-            city=city,
-            country=country,
-            days_ahead=days_ahead,
-            start_in_days=start_in_days,
-            include_mock=include_mock,
-            query=query,
-            limit=limit,
-            offset=offset,
-        )
+    """
+    Synchronous wrapper around _search_events_async that works both
+    inside and outside an existing event loop.
+    """
+    coro = _search_events_async(
+        city=city,
+        country=country,
+        days_ahead=days_ahead,
+        start_in_days=start_in_days,
+        include_mock=include_mock,
+        query=query,
+        limit=limit,
+        offset=offset,
     )
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # we're inside an async context (e.g. FastAPI /agent),
+        # so run the search in its own fresh loop
+        return _run_coro_in_new_loop(coro)
+    else:
+        # top-level sync context (e.g. CLI, scripts)
+        return asyncio.run(coro)
+
 
 
 # Export for compatibility
