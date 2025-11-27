@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 try:
-    from providers.base import _coerce_country
+    from ..providers.base import _coerce_country
 except ImportError:
     # Fallback if base module is not available
     def _coerce_country(cc: Any, default: str) -> str:
@@ -37,7 +37,8 @@ def _parse_start_time(value: Any) -> Optional[datetime]:
     if isinstance(value, str):
         try:
             if value.endswith("Z"):
-                dt = datetime.strptime(value, ISO_Z_FMT).replace(tzinfo=timezone.utc)
+                dt = datetime.strptime(value, ISO_Z_FMT).replace(
+                    tzinfo=timezone.utc)
             else:
                 dt = datetime.fromisoformat(value)
                 if dt.tzinfo is None:
@@ -246,10 +247,12 @@ def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
 
 def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
-    start = (now + timedelta(days=start_in_days)
-             ).replace(hour=0, minute=0, second=0, microsecond=0)
-    end = (now + timedelta(days=start_in_days + days_ahead)
-           ).replace(hour=23, minute=59, second=59, microsecond=0)
+    start = (now + timedelta(days=start_in_days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    end = (now + timedelta(days=start_in_days + days_ahead)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
     return start, end
 
 
@@ -265,7 +268,8 @@ def _filter_kwargs(func, **kw):
         explicit = {
             name
             for name, p in sig.parameters.items()
-            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            if p.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         }
         return {k: v for k, v in kw.items() if k in explicit}
     except Exception:
@@ -348,6 +352,7 @@ async def _search_events_async(
         providers = [p for p in providers if "mock" not in p.key.lower()]
 
     start_dt, end_dt = _date_window(start_in_days, days_ahead)
+    now = datetime.now(timezone.utc)
     per_provider = min(50, max(10, limit))
 
     tasks = [
@@ -379,11 +384,15 @@ async def _search_events_async(
         if err:
             provider_errors[key] = err
         else:
-            # Sanitize items from this provider
+            # Sanitize + filter items from this provider
             default_cc = country[:2].upper() if country else "LT"
             sanitized_chunk = [_sanitize_item(e, default_cc) for e in chunk]
             sanitized_chunk = [e for e in sanitized_chunk if e is not None]
-            items.extend(sanitized_chunk)
+
+            # NEW: keep only current + future events
+            upcoming = [e for e in sanitized_chunk if _is_upcoming(e, now=now)]
+
+            items.extend(upcoming)
 
     items = _dedupe(items)
     items.sort(key=_sort_key)
