@@ -28,7 +28,10 @@ if "username" not in st.session_state:
 # =========================
 _session = requests.Session()
 _retry = Retry(
-    total=3, connect=3, read=3, backoff_factor=0.5,
+    total=3,
+    connect=3,
+    read=3,
+    backoff_factor=0.5,
     status_forcelist=[429, 500, 502, 503, 504],
     respect_retry_after_header=True,
 )
@@ -36,7 +39,9 @@ _session.mount("https://", HTTPAdapter(max_retries=_retry))
 _session.mount("http://", HTTPAdapter(max_retries=_retry))
 
 
-def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+def _req_json(
+    method: str, path: str, *, timeout: int = 20, **kwargs
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     url = f"{API}{path}"
     t0 = time.time()
     try:
@@ -46,25 +51,30 @@ def _req_json(method: str, path: str, *, timeout: int = 20, **kwargs) -> Union[D
         return r.json()
     except Exception as e:
         elapsed = round((time.time() - t0) * 1000)
-        return {"ok": False, "error": str(e), "debug": {"url": url, "elapsed_ms": elapsed}}
+        return {
+            "ok": False,
+            "error": str(e),
+            "debug": {"url": url, "elapsed_ms": elapsed},
+        }
 
 
 def _get(path: str, **params) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return _req_json("GET", path, params=params)
 
 
-def _post(path: str, payload: Dict[str, Any], *, timeout: int = 30) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+def _post(
+    path: str, payload: Dict[str, Any], *, timeout: int = 30
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return _req_json("POST", path, timeout=timeout, json=payload)
 
 
 def _delete(path: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return _req_json("DELETE", path)
 
+
 # =========================
 # Profile helpers
 # =========================
-
-
 def load_profile(uid: str) -> Dict[str, Any]:
     res = _get(f"/profile/{uid}")
     if isinstance(res, dict) and res.get("profile"):
@@ -73,7 +83,8 @@ def load_profile(uid: str) -> Dict[str, Any]:
 
 
 def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    return _post("/profile", p)
+    uid = p.get("user_id", "demo-user")
+    return _post(f"/profile/{uid}", p)
 
 
 def _coerce_country(value) -> str:
@@ -123,7 +134,6 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
     if q:
         params["query"] = q
 
-    # Use direct request for search endpoints
     result = _get_direct("/events/search", timeout=60, **params)
 
     if not isinstance(result, dict):
@@ -154,11 +164,10 @@ def _get_direct(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": str(e), "debug": {"url": url}}
 
+
 # =========================
 # UI components
 # =========================
-
-
 def event_card(e: Dict[str, Any], key: str, user_id: str):
     with st.container():
         title = e.get("title") or "Untitled Event"
@@ -222,9 +231,11 @@ with st.sidebar.expander("API Status", expanded=False):
     if st.button("Run search test"):
         demo = _get(
             "/events/search",
-            city="Vilnius", country="LT",
-            days_ahead=120, start_in_days=0,
-            include_mock=True
+            city="Vilnius",
+            country="LT",
+            days_ahead=120,
+            start_in_days=0,
+            include_mock=True,
         )
         st.json(demo)
 
@@ -240,16 +251,19 @@ with tabs[2]:
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Account")
-            username = st.text_input("Username", value=prof.get(
-                "username") or st.session_state.username)
-            user_id = st.text_input("User ID", value=prof.get(
-                "user_id") or st.session_state.user_id)
+            username = st.text_input(
+                "Username", value=prof.get("username") or st.session_state.username
+            )
+            user_id = st.text_input(
+                "User ID", value=prof.get("user_id") or st.session_state.user_id
+            )
         with c2:
             st.subheader("Location")
             home_city = st.text_input(
                 "Home City", value=prof.get("city") or "Vilnius")
             country_in = st.text_input(
-                "Country (ISO-2)", value=(prof.get("country") or "LT"))
+                "Country (ISO-2)", value=(prof.get("country") or "LT")
+            )
 
         c3, c4 = st.columns(2)
         with c3:
@@ -257,13 +271,15 @@ with tabs[2]:
             days_ahead = st.slider("Days ahead", 7, 365,
                                    int(prof.get("days_ahead") or 120))
             start_in_days = st.slider(
-                "Start in (days)", 0, 60, int(prof.get("start_in_days") or 0))
+                "Start in (days)", 0, 60, int(prof.get("start_in_days") or 0)
+            )
         with c4:
             st.subheader("Interests")
             keywords = st.text_input(
                 "Search keywords", value=prof.get("keywords") or "")
             passions_text = st.text_area(
-                "Passions / interests", value=", ".join(prof.get("passions") or []))
+                "Passions / interests", value=", ".join(prof.get("passions") or [])
+            )
 
         if st.form_submit_button("💾 Save Settings", type="primary"):
             passions = [p.strip()
@@ -304,13 +320,15 @@ with tabs[0]:
         if st.button("🔄 Refresh", type="primary"):
             st.rerun()
         with st.expander("Search Parameters"):
-            st.json({
-                "city": prof.get("city") or "(unset)",
-                "country": prof.get("country") or "(unset)",
-                "days_ahead": prof.get("days_ahead", 120),
-                "start_in_days": prof.get("start_in_days", 0),
-                "keywords": prof.get("keywords") or "(none)",
-            })
+            st.json(
+                {
+                    "city": prof.get("city") or "(unset)",
+                    "country": prof.get("country") or "(unset)",
+                    "days_ahead": prof.get("days_ahead", 120),
+                    "start_in_days": prof.get("start_in_days", 0),
+                    "keywords": prof.get("keywords") or "(none)",
+                }
+            )
 
     with right:
         st.subheader("📅 Recommended for you")
@@ -324,7 +342,8 @@ with tabs[0]:
             items = list(res.get("items") or [])
             if not items:
                 st.info(
-                    "No events matched your Settings. Try widening the date window or clearing keywords.")
+                    "No events matched your Settings. Try widening the date window or clearing keywords."
+                )
                 if res.get("debug"):
                     with st.expander("Diagnostics"):
                         st.json(res["debug"])
@@ -346,7 +365,10 @@ with tabs[0]:
                 items.sort(key=score, reverse=True)
                 for i, ev in enumerate(items):
                     event_card(
-                        ev, key=f"discover_{i}_{ev.get('title', '')[:24]}", user_id=st.session_state.user_id)
+                        ev,
+                        key=f"discover_{i}_{ev.get('title', '')[:24]}",
+                        user_id=st.session_state.user_id,
+                    )
 
 # ---------- CHAT ----------
 with tabs[1]:
@@ -358,7 +380,7 @@ with tabs[1]:
 
     message = st.text_input(
         "💭 What are you looking for?",
-        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'"
+        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'",
     )
 
     if st.button("📤 Send", type="primary") and message:
@@ -395,12 +417,15 @@ with tabs[1]:
                     )
             else:
                 st.info(
-                    "I couldn't find any events. Try adjusting your settings or date range.")
+                    "I couldn't find any events. Try adjusting your settings or date range."
+                )
 
         # Agent responded successfully
         elif isinstance(response, dict):
-            answer = response.get("answer", "").strip(
-            ) or "I'm not sure how to help with that."
+            answer = (
+                response.get("answer", "").strip()
+                or "I'm not sure how to help with that."
+            )
             st.markdown(f"🤖 **Socialite**: {answer}")
 
             events = response.get("items", [])
@@ -433,15 +458,21 @@ with tabs[1]:
             if isinstance(result, dict) and result.get("ok"):
                 st.success("✅ Subscribed!")
             else:
-                hint = result.get("hint") if isinstance(
-                    result, dict) else "Subscription feature coming soon!"
-                st.info(f"{hint}")
+                hint = (
+                    result.get("hint")
+                    if isinstance(result, dict)
+                    else "Subscription feature coming soon!"
+                )
+                st.info(f"ℹ️ {hint}")
 
     with col2:
         if st.button("📧 Get Latest Digest"):
             digest_result = _get(f"/agent/digest/{st.session_state.user_id}")
-            digest = digest_result.get("digest", []) if isinstance(
-                digest_result, dict) else []
+            digest = (
+                digest_result.get("digest", [])
+                if isinstance(digest_result, dict)
+                else []
+            )
             if digest:
                 with st.expander("📰 Latest Digest", expanded=True):
                     for item in digest:
