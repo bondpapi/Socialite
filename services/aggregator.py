@@ -19,6 +19,47 @@ except ImportError:
             return cc.strip().upper()
         return default
 
+ISO_Z_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _parse_start_time(value: Any) -> Optional[datetime]:
+    """
+    Best-effort parser for provider start_time values.
+    Accepts ISO strings (with or without 'Z') or datetime objects.
+    Returns an aware UTC datetime or None if parsing fails.
+    """
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if isinstance(value, str):
+        try:
+            if value.endswith("Z"):
+                dt = datetime.strptime(value, ISO_Z_FMT).replace(tzinfo=timezone.utc)
+            else:
+                dt = datetime.fromisoformat(value)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    return None
+
+
+def _is_upcoming(ev: Dict[str, Any], *, now: datetime) -> bool:
+    """
+    Keep only events starting at or after 'now'.
+    If we can't parse a start_time, we keep the event to avoid
+    accidentally throwing away valid data.
+    """
+    dt = _parse_start_time(ev.get("start_time"))
+    if dt is None:
+        return True
+    return dt >= now
+
 # ---------- Provider dataclass ----------
 
 
