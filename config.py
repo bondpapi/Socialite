@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -17,17 +18,25 @@ try:
         default_city: str = "Vilnius"
 
         # Discovery
-        ics_urls: list[str] = Field(default_factory=list, validation_alias="ICS_URLS")
-        tavily_api_key: str | None = Field(default=None, validation_alias="TAVILY_API_KEY")
-        enable_web_discovery: bool = Field(False, validation_alias="ENABLE_WEB_DISCOVERY")
-        enable_mock_provider: bool = Field(True, validation_alias="ENABLE_MOCK_PROVIDER")
-        discovery_domains: list[str] = Field(default_factory=list, validation_alias="DISCOVERY_DOMAINS")
+        ics_urls: list[str] = Field(
+            default_factory=list, validation_alias="ICS_URLS"
+        )
+        tavily_api_key: str | None = Field(
+            default=None, validation_alias="TAVILY_API_KEY"
+        )
+        enable_web_discovery: bool = Field(
+            False, validation_alias="ENABLE_WEB_DISCOVERY"
+        )
+        enable_mock_provider: bool = Field(
+            True, validation_alias="ENABLE_MOCK_PROVIDER"
+        )
+        discovery_domains: list[str] = Field(
+            default_factory=list, validation_alias="DISCOVERY_DOMAINS"
+        )
 
         # Providers (API keys optional)
         ticketmaster_api_key: str | None = None
         stubhub_api_key: str | None = None
-        seatgeek_client_id: str | None = None
-        seatgeek_client_secret: str | None = None
         viagogo_api_key: str | None = None
         google_maps_api_key: str | None = None
         eventbrite_token: str | None = None
@@ -38,8 +47,12 @@ try:
         enable_price_compare: bool = True
 
         # HTTP client (new)
-        http_timeout_seconds: float = Field(8.0, validation_alias="HTTP_TIMEOUT_SECONDS")
-        http_max_retries: int = Field(4, validation_alias="HTTP_MAX_RETRIES")
+        http_timeout_seconds: float = Field(
+            8.0, validation_alias="HTTP_TIMEOUT_SECONDS"
+        )
+        http_max_retries: int = Field(
+            4, validation_alias="HTTP_MAX_RETRIES"
+        )
 
         model_config = SettingsConfigDict(
             env_file=str(ENV_PATH),
@@ -62,8 +75,6 @@ except Exception:
 
         ticketmaster_api_key: str | None = None
         stubhub_api_key: str | None = None
-        seatgeek_client_id: str | None = None
-        seatgeek_client_secret: str | None = None
         viagogo_api_key: str | None = None
         google_maps_api_key: str | None = None
         eventbrite_token: str | None = None
