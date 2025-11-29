@@ -30,8 +30,8 @@ app.add_middleware(
 # Metrics
 app.add_middleware(MetricsMiddleware)
 
-# Use uvicorn/error logger so messages show in Render logs
 _log = logging.getLogger("uvicorn.error")
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -59,14 +59,16 @@ app.include_router(agent_router.router)
 app.include_router(auth_router.router)
 app.include_router(profile_router.router)
 
-# Health (Render warmup hits this)
+
 @app.get("/ping")
 def ping():
     return {"ok": True, "ts": _t.time()}
 
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.get("/")
 def root():
