@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from typing import Iterable
+
 
 def score_event(event: dict, passions: list[str]) -> float:
     base = 0.0

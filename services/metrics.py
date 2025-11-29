@@ -141,25 +141,36 @@ def timeline_http(last_n: int = 300) -> List[Dict[str, Any]]:
     return out
 
 
-PRICE_PER_1K = {
-    # Example prices — adjust to your models
-    # "gpt-4o-mini": dict(prompt=0.15, completion=0.60),  # $/1K tokens
-    # "gpt-4o": dict(prompt=5.00, completion=15.00),
-}
+PRICE_PER_1K = {}
 
-def log_llm_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:
+
+def log_llm_usage(
+    model: str, prompt_tokens: int, completion_tokens: int
+) -> None:
     p = PRICE_PER_1K.get(model)
     est = 0.0
     if p:
-        est = (prompt_tokens / 1000.0) * p["prompt"] + (completion_tokens / 1000.0) * p["completion"]
+        est = (
+            (prompt_tokens / 1000.0) * p["prompt"]
+            + (completion_tokens / 1000.0) * p["completion"]
+        )
     total = prompt_tokens + completion_tokens
     with _connect() as conn:
         conn.execute(
             """
-            INSERT INTO llm_usage (model, prompt_tokens, completion_tokens, total_tokens, est_cost_usd)
+            INSERT INTO llm_usage (
+                model, prompt_tokens, completion_tokens,
+                total_tokens, est_cost_usd
+            )
             VALUES (?, ?, ?, ?, ?)
             """,
-            (model, int(prompt_tokens), int(completion_tokens), int(total), float(est)),
+            (
+                model,
+                int(prompt_tokens),
+                int(completion_tokens),
+                int(total),
+                float(est),
+            ),
         )
         conn.commit()
 
@@ -199,7 +210,12 @@ def summary_llm() -> Dict[str, Any]:
             est_cost_usd=round(totals["cost"] or 0.0, 4),
         ),
         models=[
-            dict(model=r["model"], calls=r["calls"], total_tokens=r["tt"] or 0, est_cost_usd=round(r["cost"] or 0.0, 4))
+            dict(
+                model=r["model"],
+                calls=r["calls"],
+                total_tokens=r["tt"] or 0,
+                est_cost_usd=round(r["cost"] or 0.0, 4),
+            )
             for r in by_model
         ],
     )

@@ -1,11 +1,11 @@
 """
 Robust HTTP session with retries/backoff for all outbound requests.
 """
-from typing import Optional, Mapping, Any
+from typing import Any, Mapping, Optional
+
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
-# services/http.py
 DEFAULT_HEADERS = {"User-Agent": "Socialite/0.1 (+https://example.com)"}
 
 
@@ -40,7 +40,9 @@ def get(
     headers: Optional[Mapping[str, str]] = None,
     timeout: int = 12,
 ) -> requests.Response:
-    return _SESSION.get(url, params=params, headers=headers or {}, timeout=timeout)
+    return _SESSION.get(
+        url, params=params, headers=headers or {}, timeout=timeout
+    )
 
 
 def post(
@@ -50,4 +52,6 @@ def post(
     headers: Optional[Mapping[str, str]] = None,
     timeout: int = 12,
 ) -> requests.Response:
-    return _SESSION.post(url, json=json, headers=headers or {}, timeout=timeout)
+    return _SESSION.post(
+        url, json=json, headers=headers or {}, timeout=timeout
+    )

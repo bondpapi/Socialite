@@ -4,16 +4,15 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import sys
-from pathlib import Path
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 try:
     from ..providers.base import _coerce_country
 except ImportError:
-    # Fallback if base module is not available
     def _coerce_country(cc: Any, default: str) -> str:
         if isinstance(cc, str) and len(cc.strip()) == 2:
             return cc.strip().upper()
@@ -61,6 +60,7 @@ def _is_upcoming(ev: Dict[str, Any], *, now: datetime) -> bool:
         return True
     return dt >= now
 
+
 # ---------- Provider dataclass ----------
 
 
@@ -81,6 +81,7 @@ _DISCOVERY: Dict[str, Any] = {
     "errors": {},
 }
 _PROVIDERS: List[Provider] = []
+
 
 # ---------- Module discovery ----------
 
@@ -112,6 +113,7 @@ def _iter_provider_modules() -> Iterable[str]:
             mod = f"providers.{py.stem}"
             _DISCOVERY["discovered_modules"].append(mod)
             yield mod
+
 
 # ---------- Loader ----------
 
@@ -218,14 +220,19 @@ def _sanitize_item(ev: Dict[str, Any], default_cc: str) -> Optional[Dict[str, An
 # initial load
 _load_providers()
 
+
 # ---------- Diagnostics / helpers ----------
 
 
 def list_provider_diagnostics() -> Dict[str, Any]:
     return {
         "providers": [
-            {"key": p.key, "module": p.module,
-                "is_async": p.is_async, "name": p.name}
+            {
+                "key": p.key,
+                "module": p.module,
+                "is_async": p.is_async,
+                "name": p.name,
+            }
             for p in _PROVIDERS
         ],
         "discovery": _DISCOVERY,
@@ -236,16 +243,24 @@ def _discover_providers() -> List[Provider]:
     return list(_PROVIDERS)
 
 
-def list_providers(include_mock: Optional[bool] = None) -> List[Dict[str, str]]:
+def list_providers(
+    include_mock: Optional[bool] = None
+) -> List[Dict[str, str]]:
     providers = _discover_providers()
     if include_mock is False:
         providers = [p for p in providers if "mock" not in p.key.lower()]
-    return [{"key": p.key, "name": p.name or p.key, "module": p.module} for p in providers]
+    return [
+        {"key": p.key, "name": p.name or p.key, "module": p.module}
+        for p in providers
+    ]
+
 
 # ---------- Fan-out utilities ----------
 
 
-def _date_window(start_in_days: int, days_ahead: int) -> Tuple[datetime, datetime]:
+def _date_window(
+    start_in_days: int, days_ahead: int
+) -> Tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     start = (now + timedelta(days=start_in_days)).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -297,6 +312,7 @@ def _sort_key(e: Dict[str, Any]):
     start = e.get("start_time") or "9999-12-31T00:00:00Z"
     title = (e.get("title") or "").lower()
     return (start, title)
+
 
 # ---------- Core fan-out ----------
 
@@ -386,11 +402,17 @@ async def _search_events_async(
         else:
             # Sanitize + filter items from this provider
             default_cc = country[:2].upper() if country else "LT"
-            sanitized_chunk = [_sanitize_item(e, default_cc) for e in chunk]
-            sanitized_chunk = [e for e in sanitized_chunk if e is not None]
+            sanitized_chunk = [
+                _sanitize_item(e, default_cc) for e in chunk
+            ]
+            sanitized_chunk = [
+                e for e in sanitized_chunk if e is not None
+            ]
 
             # NEW: keep only current + future events
-            upcoming = [e for e in sanitized_chunk if _is_upcoming(e, now=now)]
+            upcoming = [
+                e for e in sanitized_chunk if _is_upcoming(e, now=now)
+            ]
 
             items.extend(upcoming)
 
@@ -406,12 +428,16 @@ async def _search_events_async(
         "providers_used": [p.key for p in providers],
         "debug": {
             "provider_errors": provider_errors,
-            "window": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+            "window": {
+                "start": start_dt.isoformat(),
+                "end": end_dt.isoformat(),
+            },
             "discovered": [p.key for p in _discover_providers()],
             "limit": limit,
             "offset": offset,
         },
     }
+
 
 # Public API
 
@@ -481,13 +507,10 @@ def search_events_sync(
         loop = None
 
     if loop and loop.is_running():
-        # we're inside an async context (e.g. FastAPI /agent),
-        # so run the search in its own fresh loop
         return _run_coro_in_new_loop(coro)
     else:
         # top-level sync context (e.g. CLI, scripts)
         return asyncio.run(coro)
-
 
 
 # Export for compatibility

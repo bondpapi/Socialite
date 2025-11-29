@@ -1,10 +1,13 @@
 from __future__ import annotations
+
 from datetime import date
 
 ADULT_TAGS = {"kink", "bdsm", "fetish", "adult"}
 
 
-def is_allowed_event(*, user_birthday: date | None, event_tags: set[str]) -> bool:
+def is_allowed_event(
+    *, user_birthday: date | None, event_tags: set[str]
+) -> bool:
     if user_birthday is None:
         return True  # unknown age → do not filter (can change policy)
     # simple age calc
