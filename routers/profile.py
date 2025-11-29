@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 _storage = None
 try:
-    from services import storage as _storage  # your storage service
+    from services import storage as _storage
 except Exception:
     pass
 
@@ -18,7 +19,7 @@ class ProfileIn(BaseModel):
     username: Optional[str] = None
     city: Optional[str] = None
     country: Optional[str] = None
-    passions: Optional[List[str]] = None  # interests/tags
+    passions: Optional[List[str]] = None
 
 
 @router.get("/{user_id}")

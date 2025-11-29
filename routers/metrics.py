@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 from fastapi import APIRouter
-from typing import Dict, Any
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-# If you have a middleware or service exposing counters, you can import it here.
 _metrics_impl = None
 try:
     from services import metrics as _metrics_impl  # optional
@@ -20,5 +20,5 @@ def get_metrics() -> Dict[str, Any]:
             return {"ok": True, "metrics": _metrics_impl.snapshot()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-    # Safe default so /metrics never 500s
+
     return {"ok": True, "metrics": {"status": "up"}}

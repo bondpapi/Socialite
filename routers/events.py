@@ -1,22 +1,23 @@
-# routers/events.py
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from services.recommend import rank_events
-from services.aggregator import (
-    list_providers as agg_list_providers,         
-    list_provider_diagnostics as agg_diag,         
-    search_events as agg_search_events,            
-)
 from schemas import EventOut
+from services.aggregator import (
+    list_provider_diagnostics as agg_diag,
+    list_providers as agg_list_providers,
+    search_events as agg_search_events,
+)
+from services.recommend import rank_events
 
 router = APIRouter(prefix="/events", tags=["events"])
 
-
 # ---------- Responses ----------
+
+
 class ProvidersResponse(BaseModel):
     providers: List[Dict[str, str]] = Field(default_factory=list)
     discovery: Optional[Dict[str, Any]] = None
@@ -32,31 +33,43 @@ class EventsResponse(BaseModel):
 
 
 # ---------- Routes ----------
+
+
 @router.get("/providers", response_model=ProvidersResponse)
 def get_providers(include_mock: Optional[bool] = None) -> ProvidersResponse:
     """
     Return both the legacy simple list and the rich diagnostics.
-    The diagnostics include: discovered_modules, loaded, skipped, and import errors.
+    The diagnostics include: discovered_modules, loaded, skipped,
+    and import errors.
     """
 
     try:
         diag = agg_diag()
-        simple = diag.get("providers") or agg_list_providers(include_mock=include_mock)
-        return ProvidersResponse(providers=simple, discovery=diag.get("discovery"))
+        simple = (
+            diag.get("providers") or
+            agg_list_providers(include_mock=include_mock)
+        )
+        return ProvidersResponse(
+            providers=simple,
+            discovery=diag.get("discovery")
+        )
     except Exception:
-        return ProvidersResponse(providers=agg_list_providers(include_mock=include_mock))
+        return ProvidersResponse(
+            providers=agg_list_providers(include_mock=include_mock)
+        )
 
 
 @router.get("/search", response_model=EventsResponse)
 async def search(
     *,
     city: str = Query(..., min_length=1, description="City name (non-empty)"),
-    country: str = Query(..., min_length=2, max_length=2, description="Country ISO-2, e.g. LT"),
+    country: str = Query(
+        ..., min_length=2, max_length=2, description="Country ISO-2, e.g. LT"
+    ),
     days_ahead: int = Query(60, ge=1, le=3650),
     start_in_days: int = Query(0, ge=0, le=3650),
     include_mock: bool = False,
     query: Optional[str] = Query(None, description="Optional keyword filter"),
-    # NEW: light pagination to avoid giant payloads
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> EventsResponse:
@@ -74,11 +87,17 @@ async def search(
         country_clean = country.strip().upper()
 
         if not city_clean:
-            raise HTTPException(status_code=422, detail="city must be non-empty")
+            raise HTTPException(
+                status_code=422, detail="city must be non-empty"
+            )
         if not country_clean:
-            raise HTTPException(status_code=422, detail="country must be non-empty")
+            raise HTTPException(
+                status_code=422, detail="country must be non-empty"
+            )
         if len(country_clean) != 2:
-            raise HTTPException(status_code=422, detail="country must be ISO-2 code")
+            raise HTTPException(
+                status_code=422, detail="country must be ISO-2 code"
+            )
 
         # IMPORTANT: await the aggregator (it fan-outs to providers)
         agg_payload = await agg_search_events(
@@ -88,23 +107,28 @@ async def search(
             start_in_days=start_in_days,
             include_mock=include_mock,
             query=query,
-            limit=limit,               # NEW
-            offset=offset,             # NEW
+            limit=limit,
+            offset=offset,
         )
 
-        raw_items: List[Dict[str, Any]] = list(agg_payload.get("items") or [])
+        raw_items: List[Dict[str, Any]] = list(
+            agg_payload.get("items") or []
+        )
         nonfatal_errors: List[str] = []
         valid_items: List[EventOut] = []
 
         for idx, e in enumerate(raw_items):
             try:
-                valid_items.append(EventOut.model_validate(e))  # pydantic v2
+                valid_items.append(EventOut.model_validate(e))
             except ValidationError as ve:
-                nonfatal_errors.append(f"item#{idx} validation failed: {ve}")
+                nonfatal_errors.append(
+                    f"item#{idx} validation failed: {ve}"
+                )
 
-        # Optional: rank results (shield from errors)
         try:
-            valid_items = rank_events(valid_items, city=city_clean, country=country_clean)
+            valid_items = rank_events(
+                valid_items, city=city_clean, country=country_clean
+            )
         except Exception:
             pass
 
@@ -120,5 +144,6 @@ async def search(
     except HTTPException:
         raise
     except Exception as exc:
-        # Shield the route from unexpected crashes
-        raise HTTPException(status_code=500, detail=f"events.search failed: {exc!r}")
+        raise HTTPException(
+            status_code=500, detail=f"events.search failed: {exc!r}"
+        )

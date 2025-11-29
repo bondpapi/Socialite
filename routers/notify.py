@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
 
 router = APIRouter(prefix="/notify", tags=["notify"])
 
 _notifier = None
 try:
-    from services import notify as _notifier  # optional notifier service
+    from services import notify as _notifier
 except Exception:
     pass
 
@@ -16,7 +17,7 @@ except Exception:
 class NotifyRequest(BaseModel):
     user_id: str
     message: str
-    channels: Optional[List[str]] = None  # e.g., ["email","push"]
+    channels: Optional[List[str]] = None
 
 
 @router.post("")

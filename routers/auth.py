@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

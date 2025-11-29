@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -29,9 +29,12 @@ except Exception:
 
 try:
     # async search API from aggregator
-    from services.aggregator import search_events as _agg_async  # type: ignore[assignment]
+    from services.aggregator import (  # type: ignore[assignment]
+        search_events as _agg_async
+    )
 except Exception:
     _agg_async = None
+
 
 # ---------- Models ----------
 
@@ -66,6 +69,7 @@ class DigestResponse(BaseModel):
 
 # ---------- Async fallback agent (no LLM, just aggregator) ----------
 
+
 async def _fallback_agent(req: ChatRequest) -> ChatResponse:
     """
     Simple async fallback when the LLM agent is unavailable or times out.
@@ -74,7 +78,8 @@ async def _fallback_agent(req: ChatRequest) -> ChatResponse:
     msg = (req.message or "").lower()
 
     wants_events = any(
-        w in msg for w in ["event", "concert", "show", "music", "sports", "festival"]
+        w in msg
+        for w in ["event", "concert", "show", "music", "sports", "festival"]
     )
 
     # If the user isn't obviously asking for events, just respond generically.
@@ -110,7 +115,10 @@ async def _fallback_agent(req: ChatRequest) -> ChatResponse:
         if items:
             return ChatResponse(
                 ok=True,
-                answer=f"I found {len(items)} events in {city}. Here are some options:",
+                answer=(
+                    f"I found {len(items)} events in {city}. "
+                    "Here are some options:"
+                ),
                 items=items,
                 debug={
                     "fallback": True,
@@ -138,7 +146,10 @@ async def _fallback_agent(req: ChatRequest) -> ChatResponse:
     except Exception as e:
         return ChatResponse(
             ok=False,
-            answer="I'm having trouble searching for events right now. Please try again later.",
+            answer=(
+                "I'm having trouble searching for events right now. "
+                "Please try again later."
+            ),
             items=[],
             debug={
                 "fallback": True,
@@ -168,7 +179,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
         loop = asyncio.get_running_loop()
 
         def _run_root_agent() -> Dict[str, Any]:
-            # Call the root agent in a worker thread (blocking, no event-loop issues)
             return _root_agent.chat(
                 user_id=req.user_id,
                 message=req.message,
@@ -178,18 +188,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
             )
 
         try:
-            # run_in_executor + asyncio.wait_for instead of future.result(timeout=…)
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = loop.run_in_executor(executor, _run_root_agent)
                 result = await asyncio.wait_for(future, timeout=45.0)
 
             if isinstance(result, dict):
-                # Normal success from LLM agent
                 return ChatResponse(
                     ok=bool(result.get("ok", True)),
                     answer=result.get(
                         "answer",
-                        "I couldn't find any events right now. Try widening your search or check back later.",
+                        (
+                            "I couldn't find any events right now. "
+                            "Try widening your search or check back later."
+                        ),
                     ),
                     items=result.get("items") or [],
                     debug={
@@ -199,7 +210,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 )
 
         except asyncio.TimeoutError:
-            # Root agent is too slow → fall back to direct aggregator
             return await _fallback_agent(
                 req.copy(
                     update={
@@ -223,7 +233,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
         loop = asyncio.get_running_loop()
 
         def _run_services_agent() -> str:
-            return _services_agent(req.message, req.user_id)  # type: ignore[misc]
+            return _services_agent(  # type: ignore[misc]
+                req.message, req.user_id
+            )
 
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
@@ -269,7 +281,10 @@ async def get_digest(user_id: str) -> DigestResponse:
         digest=[
             {
                 "title": "Sample Event",
-                "note": "This is a placeholder digest. Real digests coming soon!",
+                "note": (
+                    "This is a placeholder digest. "
+                    "Real digests coming soon!"
+                ),
             }
         ],
         generated_at="2024-01-01T00:00:00Z",
