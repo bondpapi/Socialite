@@ -11,11 +11,13 @@ from services import storage
 
 _client = OpenAI(timeout=15, max_retries=1)
 
-SYSTEM_PROMPT = """You are Socialite — a friendly, efficient AI agent that finds
+SYSTEM_PROMPT = (
+    """You are Socialite — a friendly, efficient AI agent that finds
 and plans real-world events. You:
 - ask quick clarifying questions when needed,
 - use tools to search events (never guess),
-- tailor suggestions to the user's saved city, country, passions and past likes,
+- tailor suggestions to the user's saved city, country, passions and """
+    """past likes,
 - provide actionable plans (titles, venues, dates, links),
 - keep replies concise and scannable with bullets.
 
@@ -26,13 +28,17 @@ When you use the event search tool:
 
 If the user asks for a digest or notifications, call the subscribe tool.
 """
+)
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "tool_search_events",
-            "description": "Search events for a city/country with optional keyword filters.",
+            "description": (
+                "Search events for a city/country with optional "
+                "keyword filters."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -67,7 +73,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tool_save_preferences",
-            "description": "Save or update user preferences (home city/country, interests).",
+            "description": (
+                "Save or update user preferences "
+                "(home city/country, interests)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -157,7 +166,9 @@ def tool_search_events(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
 
-        storage.log_event_search(user_id, result["debug"], count=count)
+        storage.log_event_search(
+            user_id, result["debug"], count=count
+        )
         _LAST_TOOL_RESULT = result
         return result
 
@@ -236,7 +247,8 @@ def run_agent(
     country: Optional[str] = None,
 ) -> AgentTurn:
     """
-    Core agent loop. Optionally receives city/country hints for better prompting.
+    Core agent loop.
+    Optionally receives city/country hints for better prompting.
     """
     global _LAST_TOOL_RESULT
     _LAST_TOOL_RESULT = {}
@@ -245,7 +257,6 @@ def run_agent(
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
 
-    # If we have location hints, share them with the model
     if city or country:
         loc_bits = []
         if city:
@@ -255,7 +266,9 @@ def run_agent(
         messages.append(
             {
                 "role": "system",
-                "content": f"User location context: {', '.join(loc_bits)}.",
+                "content": (
+                    f"User location context: {', '.join(loc_bits)}."
+                ),
             }
         )
 
