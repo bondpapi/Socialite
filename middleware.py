@@ -20,8 +20,13 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             try:
                 route = request.scope.get("path") or request.url.path
                 method = request.method
-                status = getattr(request.state, "status_code", None) or getattr(response, "status_code", 500)
-                log_http(route=route, method=method, status=status, duration_ms=dur_ms)
+                status = (
+                    getattr(request.state, "status_code", None)
+                    or getattr(response, "status_code", 500)
+                )
+                log_http(
+                    route=route, method=method, status=status, duration_ms=dur_ms
+                )
             except Exception:
                 pass
 
