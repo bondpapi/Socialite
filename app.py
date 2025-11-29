@@ -83,8 +83,7 @@ def load_profile(uid: str) -> Dict[str, Any]:
 
 
 def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    uid = p.get("user_id", "demo-user")
-    return _post(f"/profile/{uid}", p)
+    return _post("/profile", p)
 
 
 def _coerce_country(value) -> str:
