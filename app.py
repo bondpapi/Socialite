@@ -1,31 +1,29 @@
 import os
 import time
-from typing import Dict, Any, List, Union
+from typing import Any, Dict, List, Union
 
 import requests
+import streamlit as st
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import streamlit as st
-
-# =========================
 # Config
-# =========================
-API = os.getenv("SOCIALITE_API",
-                "https://socialite-7wkx.onrender.com").rstrip("/")
+
+API = os.getenv(
+    "SOCIALITE_API", "https://socialite-7wkx.onrender.com"
+).rstrip("/")
 
 st.set_page_config(page_title="Socialite", page_icon="🎟️", layout="wide")
 st.title("Socialite")
 st.caption(f"API: `{API}`")
 
-# Session defaults
 if "user_id" not in st.session_state:
     st.session_state.user_id = "demo-user"
 if "username" not in st.session_state:
     st.session_state.username = "demo"
 
-# =========================
+
 # HTTP helpers (with retries)
-# =========================
+
 _session = requests.Session()
 _retry = Retry(
     total=3,
@@ -72,9 +70,8 @@ def _delete(path: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return _req_json("DELETE", path)
 
 
-# =========================
 # Profile helpers
-# =========================
+
 def load_profile(uid: str) -> Dict[str, Any]:
     res = _get(f"/profile/{uid}")
     if isinstance(res, dict) and res.get("profile"):
@@ -143,8 +140,9 @@ def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]
         }
 
     items = result.get("items") or []
-    normalized_count = int(result.get(
-        "count") or result.get("total") or len(items))
+    normalized_count = int(
+        result.get("count") or result.get("total") or len(items)
+    )
     result["count"] = normalized_count
 
     dbg = result.get("debug") or {}
@@ -164,9 +162,8 @@ def _get_direct(path: str, *, timeout: int = 60, **params) -> Dict[str, Any]:
         return {"ok": False, "error": str(e), "debug": {"url": url}}
 
 
-# =========================
 # UI components
-# =========================
+
 def event_card(e: Dict[str, Any], key: str, user_id: str):
     with st.container():
         title = e.get("title") or "Untitled Event"
@@ -215,9 +212,8 @@ def event_card(e: Dict[str, Any], key: str, user_id: str):
         st.divider()
 
 
-# =========================
 # Main App
-# =========================
+
 # Sidebar API status
 with st.sidebar.expander("API Status", expanded=False):
     st.caption(f"Base: `{API}`")
@@ -251,15 +247,18 @@ with tabs[2]:
         with c1:
             st.subheader("Account")
             username = st.text_input(
-                "Username", value=prof.get("username") or st.session_state.username
+                "Username",
+                value=prof.get("username") or st.session_state.username,
             )
             user_id = st.text_input(
-                "User ID", value=prof.get("user_id") or st.session_state.user_id
+                "User ID",
+                value=prof.get("user_id") or st.session_state.user_id,
             )
         with c2:
             st.subheader("Location")
             home_city = st.text_input(
-                "Home City", value=prof.get("city") or "Vilnius")
+                "Home City", value=prof.get("city") or "Vilnius"
+            )
             country_in = st.text_input(
                 "Country (ISO-2)", value=(prof.get("country") or "LT")
             )
@@ -267,22 +266,26 @@ with tabs[2]:
         c3, c4 = st.columns(2)
         with c3:
             st.subheader("Search Window")
-            days_ahead = st.slider("Days ahead", 7, 365,
-                                   int(prof.get("days_ahead") or 120))
+            days_ahead = st.slider(
+                "Days ahead", 7, 365, int(prof.get("days_ahead") or 120)
+            )
             start_in_days = st.slider(
                 "Start in (days)", 0, 60, int(prof.get("start_in_days") or 0)
             )
         with c4:
             st.subheader("Interests")
             keywords = st.text_input(
-                "Search keywords", value=prof.get("keywords") or "")
+                "Search keywords", value=prof.get("keywords") or ""
+            )
             passions_text = st.text_area(
-                "Passions / interests", value=", ".join(prof.get("passions") or [])
+                "Passions / interests",
+                value=", ".join(prof.get("passions") or []),
             )
 
         if st.form_submit_button("💾 Save Settings", type="primary"):
-            passions = [p.strip()
-                        for p in passions_text.split(",") if p.strip()]
+            passions = [
+                p.strip() for p in passions_text.split(",") if p.strip()
+            ]
             country_iso2 = (country_in or "").strip().upper()[:2]
 
             payload = {
@@ -303,8 +306,9 @@ with tabs[2]:
                 st.session_state.username = payload["username"]
                 st.rerun()
             else:
-                error_msg = r.get("error") if isinstance(
-                    r, dict) else "Unknown error"
+                error_msg = (
+                    r.get("error") if isinstance(r, dict) else "Unknown error"
+                )
                 st.error(f"Save failed: {error_msg}")
 
 # ---------- DISCOVER ----------
@@ -333,7 +337,8 @@ with tabs[0]:
         st.subheader("📅 Recommended for you")
         if not (prof.get("city") and prof.get("country")):
             st.warning(
-                "Set your **Home City** and **Country** in Settings first.")
+                "Set your **Home City** and **Country** in Settings first."
+            )
         else:
             with st.spinner("🔍 Finding events..."):
                 res = search_from_profile(prof, include_mock_feed)
@@ -341,7 +346,8 @@ with tabs[0]:
             items = list(res.get("items") or [])
             if not items:
                 st.info(
-                    "No events matched your Settings. Try widening the date window or clearing keywords."
+                    "No events matched your Settings. Try widening the "
+                    "date window or clearing keywords."
                 )
                 if res.get("debug"):
                     with st.expander("Diagnostics"):
@@ -379,7 +385,10 @@ with tabs[1]:
 
     message = st.text_input(
         "💭 What are you looking for?",
-        placeholder="e.g., 'concerts this weekend in my city' or 'comedy shows next month'",
+        placeholder=(
+            "e.g., 'concerts this weekend in my city' or "
+            "'comedy shows next month'"
+        ),
     )
 
     if st.button("📤 Send", type="primary") and message:
@@ -397,13 +406,14 @@ with tabs[1]:
         # Handle network/HTTP failure
         if isinstance(response, dict) and response.get("error"):
             st.warning(
-                "The AI agent had trouble replying (network or timeout issue). "
-                "Falling back to a direct event search instead."
+                "The AI agent had trouble replying (network or timeout "
+                "issue). Falling back to a direct event search instead."
             )
 
             with st.spinner("🔍 Searching events directly..."):
                 search_result = search_from_profile(
-                    profile, include_mock=False)
+                    profile, include_mock=False
+                )
 
             items = search_result.get("items", [])
             if items:
@@ -416,7 +426,8 @@ with tabs[1]:
                     )
             else:
                 st.info(
-                    "I couldn't find any events. Try adjusting your settings or date range."
+                    "I couldn't find any events. Try adjusting your "
+                    "settings or date range."
                 )
 
         # Agent responded successfully
