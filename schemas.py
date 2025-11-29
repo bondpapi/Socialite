@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import List, Optional
+
 from pydantic import BaseModel, Field
-from typing import Optional, List
+
 
 class UserCreate(BaseModel):
     name: str
@@ -34,7 +36,6 @@ class EventOut(BaseModel):
     country: Optional[str] = None
     venue_name: Optional[str] = None
     url: Optional[str] = None
-    # New/enriched:
     description: Optional[str] = None
     image_url: Optional[str] = None
     currency: Optional[str] = None

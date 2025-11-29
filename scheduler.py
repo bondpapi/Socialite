@@ -1,10 +1,12 @@
 from __future__ import annotations
+
 import threading
 import time
 from datetime import datetime, timedelta
 
 from services import storage
 from services.aggregator import search_events
+
 
 def _tick():
     """
@@ -27,8 +29,14 @@ def _tick():
                 if passions:
                     query = passions[0]
 
-                data = search_events(city=city, country=country, days_ahead=14,
-                                     start_in_days=0, include_mock=False, query=query)
+                data = search_events(
+                    city=city,
+                    country=country,
+                    days_ahead=14,
+                    start_in_days=0,
+                    include_mock=False,
+                    query=query,
+                )
                 items = data.get("items", [])[:10]
                 if items:
                     storage.save_digest(sub["user_id"], items)
