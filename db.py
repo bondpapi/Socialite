@@ -46,7 +46,8 @@ def upsert_user(user_id: str, display_name: Optional[str]) -> None:
             """
             INSERT INTO users (user_id, display_name)
             VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET display_name=excluded.display_name
+            ON CONFLICT(user_id)
+            DO UPDATE SET display_name=excluded.display_name
             """,
             (user_id, display_name),
         )
@@ -55,7 +56,10 @@ def upsert_user(user_id: str, display_name: Optional[str]) -> None:
 
 def get_user(user_id: str) -> Optional[Dict[str, Any]]:
     with _connect() as conn:
-        row = conn.execute("SELECT user_id, display_name FROM users WHERE user_id=?", (user_id,)).fetchone()
+        row = conn.execute(
+            "SELECT user_id, display_name FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
         if not row:
             return None
         return {"user_id": row["user_id"], "display_name": row["display_name"]}
@@ -68,7 +72,8 @@ def save_event(user_id: str, event_key: str, data: Dict[str, Any]) -> None:
             """
             INSERT INTO saved_events (user_id, event_key, data_json)
             VALUES (?, ?, ?)
-            ON CONFLICT(user_id, event_key) DO UPDATE SET data_json=excluded.data_json
+            ON CONFLICT(user_id, event_key)
+            DO UPDATE SET data_json=excluded.data_json
             """,
             (user_id, event_key, payload),
         )
@@ -77,7 +82,10 @@ def save_event(user_id: str, event_key: str, data: Dict[str, Any]) -> None:
 
 def delete_event(user_id: str, event_key: str) -> None:
     with _connect() as conn:
-        conn.execute("DELETE FROM saved_events WHERE user_id=? AND event_key=?", (user_id, event_key))
+        conn.execute(
+            "DELETE FROM saved_events WHERE user_id=? AND event_key=?",
+            (user_id, event_key),
+        )
         conn.commit()
 
 
