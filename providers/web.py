@@ -1,10 +1,11 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-from pathlib import Path
 
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from providers import web_discovery
 from utils.cache import FileCache
 from utils.http_client import HttpClient
-from providers import web_discovery
 
 KEY = "web"
 NAME = "Web Discovery"
@@ -12,6 +13,7 @@ NAME = "Web Discovery"
 # Optional settings
 try:
     from config import settings  # type: ignore
+
     cache_root = Path(getattr(settings, "cache_dir", "."))
     http_timeout = float(getattr(settings, "http_timeout_seconds", 8.0))
 except Exception:
@@ -19,6 +21,7 @@ except Exception:
     http_timeout = 8.0
 
 cache = FileCache(cache_root, enabled=True)
+
 
 def search(
     *,

@@ -1,15 +1,17 @@
 from __future__ import annotations
-from typing import Any, Dict, Iterable, List, Optional
+
+import json
 import logging
 import re
-import json
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
 from bs4 import BeautifulSoup
 
-from utils.http_client import HttpClient
-from utils.cache import FileCache
 from config import settings
 from providers.base import build_event
+from utils.cache import FileCache
+from utils.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +32,13 @@ except Exception:
 
 cache = FileCache(cache_root, enabled=True)
 
+
 def _cache() -> FileCache:
-    return FileCache(Path(getattr(settings, "cache_dir", ".")), enabled=getattr(settings, "cache_enabled", True))
+    return FileCache(
+        Path(getattr(settings, "cache_dir", ".")),
+        enabled=getattr(settings, "cache_enabled", True)
+    )
+
 
 def _looks_like_event_title(text: str) -> bool:
     if not text:
@@ -39,7 +46,9 @@ def _looks_like_event_title(text: str) -> bool:
     bad = {"cookies", "privacy", "login", "terms"}
     return not any(w in text.lower() for w in bad)
 
+
 _A_RE = re.compile(r'<a[^>]+href="([^"]+)"[^>]*>([^<]{4,200})</a>', re.I)
+
 
 def _extract_links(html: str) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
@@ -49,6 +58,7 @@ def _extract_links(html: str) -> List[Dict[str, str]]:
         out.append({"href": href, "title": title})
     return out
 
+
 def _first(obj, *keys):
     cur = obj
     for k in keys:
@@ -57,6 +67,7 @@ def _first(obj, *keys):
         else:
             return None
     return cur
+
 
 def _jsonld_from_html(html: str) -> List[Dict[str, Any]]:
     soup = BeautifulSoup(html, "html.parser")
@@ -80,7 +91,15 @@ def _jsonld_from_html(html: str) -> List[Dict[str, Any]]:
                             out.append(g)
     return out
 
-def _enrich_from_jsonld(html: str, *, city: str, country: str, fallback_title: str, url: str) -> Dict[str, Any]:
+
+def _enrich_from_jsonld(
+    html: str,
+    *,
+    city: str,
+    country: str,
+    fallback_title: str,
+    url: str
+) -> Dict[str, Any]:
     for ev in _jsonld_from_html(html):
         title = ev.get("name") or fallback_title
         url0 = ev.get("url") or url
@@ -98,7 +117,11 @@ def _enrich_from_jsonld(html: str, *, city: str, country: str, fallback_title: s
             venue_name = loc.get("name") or None
             addr = loc.get("address") or {}
             if isinstance(addr, dict):
-                city0 = addr.get("addressLocality") or addr.get("addressRegion") or None
+                city0 = (
+                    addr.get("addressLocality") or
+                    addr.get("addressRegion") or
+                    None
+                )
                 country0 = addr.get("addressCountry") or None
 
         # dates
@@ -158,6 +181,7 @@ def _enrich_from_jsonld(html: str, *, city: str, country: str, fallback_title: s
         source="web",
     )
 
+
 def crawl_sites(
     *,
     client: HttpClient,
@@ -185,7 +209,9 @@ def crawl_sites(
         html = _cache().get_or_set(
             CACHE_NS,
             json.dumps({"seed": url}),
-            max_age=float(getattr(settings, "web_cache_ttl_seconds", 3600)),
+            max_age=float(
+                getattr(settings, "web_cache_ttl_seconds", 3600)
+            ),
             producer=_fetch_html,
         )
         if not html:
@@ -216,11 +242,19 @@ def crawl_sites(
             detail_html = _cache().get_or_set(
                 CACHE_NS,
                 json.dumps({"detail": href}),
-                max_age=float(getattr(settings, "web_cache_ttl_seconds", 3600)),
+                max_age=float(
+                    getattr(settings, "web_cache_ttl_seconds", 3600)
+                ),
                 producer=_fetch_detail,
             )
 
-            enriched = _enrich_from_jsonld(detail_html, city=city, country=country, fallback_title=title, url=href)
+            enriched = _enrich_from_jsonld(
+                detail_html,
+                city=city,
+                country=country,
+                fallback_title=title,
+                url=href
+            )
             if keyword:
                 if keyword.lower() not in (enriched["title"] or "").lower():
                     continue
