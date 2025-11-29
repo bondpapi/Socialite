@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-import re
 
 ISO_Z_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
 
 def to_iso_z(dt: datetime | None) -> Optional[str]:
     if not dt:
@@ -15,7 +16,9 @@ def to_iso_z(dt: datetime | None) -> Optional[str]:
         dt = dt.astimezone(timezone.utc)
     return dt.strftime(ISO_Z_FMT)
 
+
 _ws_re = re.compile(r"\s+")
+
 
 def _clean(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -41,6 +44,7 @@ _COUNTRY_ALIASES = {
     # Add more as you encounter them
 }
 
+
 def _coerce_country(value: Any, default: Optional[str] = None) -> Optional[str]:
     """
     Convert arbitrary provider 'country' fields into an ISO-2 string.
@@ -65,7 +69,7 @@ def _coerce_country(value: Any, default: Optional[str] = None) -> Optional[str]:
         alias = _COUNTRY_ALIASES.get(s.lower())
         if alias:
             return alias
-        # Fallback: if string is longer, keep first 2 letters uppercased
+
         return s[:2].upper() if len(s) >= 2 else default
 
     return default

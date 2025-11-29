@@ -1,18 +1,19 @@
-# providers/eventbrite.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from services import http
 from providers.base import build_event, to_iso_z
+from services import http
 
 KEY = "eventbrite"
 NAME = "Eventbrite"
 EB_URL = "https://www.eventbriteapi.com/v3/events/search/"
 
+
 def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
     return to_iso_z(start), to_iso_z(end)
+
 
 def _parse_venue(venue: Dict[str, Any]) -> Dict[str, Optional[str]]:
     name = venue.get("name") or None
@@ -20,6 +21,7 @@ def _parse_venue(venue: Dict[str, Any]) -> Dict[str, Optional[str]]:
     city = address.get("city") or None
     country = address.get("country") or None
     return {"venue_name": name, "city": city, "country": country}
+
 
 def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     title = (e.get("name") or {}).get("text") or e.get("name") or None
@@ -62,8 +64,10 @@ def _parse_event(e: Dict[str, Any], venue_map: Dict[str, Dict[str, Any]]) -> Dic
         source=KEY,
     )
 
+
 class EventbriteProvider:
     name = KEY
+
     def __init__(self, token: Optional[str]) -> None:
         self.token = token
 
@@ -115,7 +119,8 @@ class EventbriteProvider:
         if not items:
             params.pop("location.address", None)
             params["location.within"] = "400km"
-            resp2 = http.get(EB_URL, params=params, headers=headers, timeout=12)
+            resp2 = http.get(EB_URL, params=params,
+                             headers=headers, timeout=12)
             if resp2.status_code == 200:
                 collect(resp2.json() or {})
 
@@ -135,14 +140,16 @@ async def search(
 ) -> List[Dict[str, Any]]:
     try:
         from config import settings
-        token = getattr(settings, "eventbrite_token", None) or getattr(settings, "EVENTBRITE_TOKEN", None)
+        token = getattr(settings, "eventbrite_token", None) or getattr(
+            settings, "EVENTBRITE_TOKEN", None)
     except Exception:
         token = None
 
     if start is None or end is None:
         now = datetime.now(timezone.utc)
         start = (now).replace(hour=0, minute=0, second=0, microsecond=0)
-        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+        end = (now + timedelta(days=90)).replace(hour=23,
+                                                 minute=59, second=59, microsecond=0)
 
     provider = EventbriteProvider(token)
     return await provider.search(city=city, country=country, start=start, end=end, query=query)

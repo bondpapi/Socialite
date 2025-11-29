@@ -1,24 +1,27 @@
-# providers/ticketmaster.py
 from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from services import http
 from providers.base import build_event, to_iso_z
+from services import http
 
 KEY = "ticketmaster"
 NAME = "Ticketmaster"
 TM_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
 
+
 # --------- helpers ---------
+
 
 def _iso_window(start: datetime, end: datetime) -> Tuple[str, str]:
     return to_iso_z(start), to_iso_z(end)
 
+
 def _first(x):
     return x[0] if isinstance(x, list) and x else None
+
 
 def _country_iso(venue: Dict[str, Any], fallback: str = "") -> str:
     c = (venue or {}).get("country") or {}
@@ -29,6 +32,7 @@ def _country_iso(venue: Dict[str, Any], fallback: str = "") -> str:
     if len(name) >= 2:
         return name[:2].upper()
     return (fallback or "").strip().upper()[:2]
+
 
 def _parse_tm_item(it: Dict[str, Any], country_default: str) -> Dict[str, Any]:
     title = it.get("name")
@@ -49,8 +53,13 @@ def _parse_tm_item(it: Dict[str, Any], country_default: str) -> Dict[str, Any]:
 
     # venue/city/country
     venue = _first(((it.get("_embedded") or {}).get("venues")) or [])
-    venue_name = venue.get("name") if isinstance(venue, dict) else None
-    city = (venue.get("city") or {}).get("name") if isinstance(venue, dict) else None
+    venue_name = (
+        venue.get("name") if isinstance(venue, dict) else None
+    )
+    city = (
+        (venue.get("city") or {}).get("name")
+        if isinstance(venue, dict) else None
+    )
     country = _country_iso(venue or {}, fallback=country_default)
 
     # category
@@ -83,7 +92,8 @@ def _parse_tm_item(it: Dict[str, Any], country_default: str) -> Dict[str, Any]:
 
     # description (avoid boilerplate "Event")
     description = it.get("info") or it.get("pleaseNote") or None
-    if description and isinstance(description, str) and description.strip().lower() == "event":
+    if (description and isinstance(description, str) and
+            description.strip().lower() == "event"):
         description = None
 
     return build_event(
@@ -102,7 +112,9 @@ def _parse_tm_item(it: Dict[str, Any], country_default: str) -> Dict[str, Any]:
         source=KEY,
     )
 
+
 # --------- provider (SYNC) ---------
+
 
 class TicketmasterProvider:
     name = KEY
@@ -160,14 +172,21 @@ class TicketmasterProvider:
                 resp2 = http.get(TM_URL, params=params, timeout=15)
                 if resp2.status_code == 200:
                     data2 = resp2.json() or {}
-                    for it in ((data2.get("_embedded") or {}).get("events") or []):
-                        items.append(_parse_tm_item(it, country_default=cc))
+                    events = (
+                        (data2.get("_embedded") or {}).get("events") or []
+                    )
+                    for it in events:
+                        items.append(
+                            _parse_tm_item(it, country_default=cc)
+                        )
             except Exception:
                 pass
 
         return items
 
+
 # --------- module entry (SYNC) ---------
+
 
 def search(
     *,
@@ -187,7 +206,10 @@ def search(
     if not api_key:
         try:
             from config import settings
-            api_key = getattr(settings, "ticketmaster_api_key", None) or getattr(settings, "TICKETMASTER_API_KEY", None)
+            api_key = (
+                getattr(settings, "ticketmaster_api_key", None) or
+                getattr(settings, "TICKETMASTER_API_KEY", None)
+            )
         except Exception:
             api_key = None
 
@@ -195,7 +217,9 @@ def search(
     if start is None or end is None:
         now = datetime.now(timezone.utc)
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = (now + timedelta(days=90)).replace(hour=23, minute=59, second=59, microsecond=0)
+        end = (now + timedelta(days=90)).replace(
+            hour=23, minute=59, second=59, microsecond=0
+        )
 
     provider = TicketmasterProvider(api_key)
     return provider.search(

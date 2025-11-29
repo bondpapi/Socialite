@@ -10,8 +10,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
-from ..services import http
 from .base import build_event
+from ..services import http
 
 KEY = "kakava"
 NAME = "Kakava"
@@ -40,6 +40,7 @@ class Window:
 
 
 _jsonld_re = re.compile(r"^\s*{")
+
 
 # ---------- time & cleaning helpers ----------
 
@@ -87,17 +88,23 @@ _COUNTRY_MAP = {
 
 def _country_str(x: Any, default_iso: str = "LT") -> str:
     """
-    Accepts a string or a JSON-LD dict like {"@type":"Country","name":"Lietuva"}.
+    Accepts a string or a JSON-LD dict like
+    {"@type":"Country","name":"Lietuva"}.
     Returns a 2-letter ISO code.
     """
     if isinstance(x, str):
         name = x.strip()
-        return _COUNTRY_MAP.get(name, (name[:2].upper() if len(name) >= 2 else default_iso))
+        if len(name) >= 2:
+            return _COUNTRY_MAP.get(name, name[:2].upper())
+        return default_iso
     if isinstance(x, dict):
         name = (x.get("name") or x.get("identifier") or "").strip()
         if name:
-            return _COUNTRY_MAP.get(name, (name[:2].upper() if len(name) >= 2 else default_iso))
+            if len(name) >= 2:
+                return _COUNTRY_MAP.get(name, name[:2].upper())
+            return default_iso
     return default_iso
+
 
 # ---------- network ----------
 
@@ -110,6 +117,7 @@ def _fetch(url: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
 
 # ---------- link extraction ----------
 
@@ -137,6 +145,7 @@ def _extract_event_links_from_html(html: str) -> List[str]:
             out.append(u)
             seen.add(u)
     return out
+
 
 # ---------- json-ld parsing ----------
 
@@ -185,11 +194,14 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
         venue_name = _clean(loc.get("name"))
         addr = loc.get("address") or {}
         if isinstance(addr, dict):
-            city = _clean(addr.get("addressLocality")
-                          or addr.get("addressRegion"))
-            country = _country_str(addr.get("addressCountry"), country_default)
+            city = _clean(
+                addr.get("addressLocality") or addr.get("addressRegion")
+            )
+            country = _country_str(
+                addr.get("addressCountry"), country_default
+            )
 
-    # NEW: try to extract description and image
+    
     description = e.get("description") or None
     image_url = e.get("image")
     if isinstance(image_url, list) and image_url:
@@ -236,6 +248,7 @@ def _map_jsonld_event(e: Dict[str, Any], country_default: str = "LT") -> Dict[st
         source=KEY,
     )
 
+
 # ---------- pagination helpers ----------
 
 
@@ -247,7 +260,9 @@ def _bump_page(url: str, page: int) -> str:
     qs = dict(parse_qsl(pr.query, keep_blank_values=True))
     qs["page"] = str(page)
     new_q = urlencode(qs)
-    return urlunparse((pr.scheme, pr.netloc, pr.path, pr.params, new_q, pr.fragment))
+    return urlunparse(
+        (pr.scheme, pr.netloc, pr.path, pr.params, new_q, pr.fragment)
+    )
 
 
 def _paginate_urls(seed_url: str, max_pages: int = 5) -> Iterable[str]:
@@ -265,6 +280,7 @@ def _paginate_urls(seed_url: str, max_pages: int = 5) -> Iterable[str]:
         else:
             yield f"{seed_url}/page/{p}"
 
+
 # ---------- category crawling ----------
 
 
@@ -280,9 +296,12 @@ def _category_urls(language: str = "en") -> List[tuple[str, str]]:
     return urls
 
 
-def _crawl_categories(language: str = "en", max_pages: int = 5) -> List[tuple[str, str]]:
+def _crawl_categories(
+    language: str = "en", max_pages: int = 5
+) -> List[tuple[str, str]]:
     """
-    Returns list of (category_key, event_link) discovered by walking category pages.
+    Returns list of (category_key, event_link) discovered by walking
+    category pages.
     """
     out: List[tuple[str, str]] = []
     seen_links = set()
@@ -302,6 +321,7 @@ def _crawl_categories(language: str = "en", max_pages: int = 5) -> List[tuple[st
                     out.append((cat_key, l))
     return out
 
+
 # ---------- search fallback ----------
 
 
@@ -312,6 +332,7 @@ def _search_site(query: str, language: str = "en") -> List[str]:
     if not html:
         return []
     return _extract_event_links_from_html(html)
+
 
 # ---------- main entry ----------
 # Compatible with both calling styles:
@@ -332,13 +353,17 @@ def search(
     query: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Crawl Kakava categories (EN & LT), parse each event page JSON-LD, and filter
-    by date window and optional city. Falls back to site search if categories are empty.
+    Crawl Kakava categories (EN & LT), parse each event page JSON-LD,
+    and filter by date window and optional city. Falls back to site
+    search if categories are empty.
     """
+
     # Build date window
     if start is not None and end is not None:
-        window = Window(start=start.astimezone(timezone.utc),
-                        end=end.astimezone(timezone.utc))
+        window = Window(
+            start=start.astimezone(timezone.utc),
+            end=end.astimezone(timezone.utc)
+        )
     else:
         window = _calc_window_from_days(start_in_days, days_ahead)
 
@@ -406,7 +431,8 @@ def search(
                     f"{mapped.get('venue_name') or ''} "
                     f"{mapped.get('title') or ''}"
                 )
-                # Be permissive: only drop when we can positively say it's not the city
+                # Be permissive: only drop when we can positively
+                # say it's not the city
                 if city_norm not in hay:
                     pass
             # ---------------------------------------------------
@@ -415,7 +441,8 @@ def search(
             if mapped.get("url") and mapped["url"].startswith("/"):
                 mapped["url"] = urljoin(BASE, mapped["url"])
 
-            # Persist a friendly category from the crawl key when JSON-LD lacks one
+            # Persist a friendly category from the crawl key when
+            # JSON-LD lacks one
             if not mapped.get("category"):
                 mapped["category"] = cat_key
 
