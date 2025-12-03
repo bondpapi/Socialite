@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel
 
-from services.aggregator import search_events_sync
 from services import storage
+from services.aggregator import search_events_sync
 
-_client = OpenAI(timeout=15, max_retries=1)
+_client = OpenAI(timeout=20, max_retries=1)
 
 SYSTEM_PROMPT = (
     """You are Socialite — a friendly, efficient AI agent that finds
@@ -266,26 +266,48 @@ def run_agent(
         messages.append(
             {
                 "role": "system",
-                "content": (
-                    f"User location context: {', '.join(loc_bits)}."
-                ),
+                "content": f"User location context: {', '.join(loc_bits)}.",
             }
         )
 
     messages.append({"role": "user", "content": message})
 
-    resp = _client.chat.completions.create(
-        model=model,
-        messages=messages,
-        tools=TOOLS,
-        tool_choice="auto",
-        temperature=0.4,
-    )
-
     used_tools: List[str] = []
-    msg = resp.choices[0].message
 
-    # Tool-call loop
+    # ---- INITIAL LLM CALL (wrapped) ----
+    try:
+        resp = _client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.4,
+        )
+        msg = resp.choices[0].message
+    except (
+        APITimeoutError,
+        RateLimitError,
+        APIError,
+        Exception,
+    ) as exc:
+        # Optional: log somewhere if you have a storage logger
+        try:
+            storage.log_agent_error(
+                user_id, f"initial_llm_call_failed: {exc!r}")
+        except Exception:
+            pass
+
+        _LAST_TOOL_RESULT = {"error": f"initial_llm_call_failed: {exc!r}"}
+        return AgentTurn(
+            reply=(
+                "Sorry, I had trouble talking to the AI model. "
+                "Please try again in a bit or use the Discover tab."
+            ),
+            used_tools=used_tools,
+            last_tool_result=_LAST_TOOL_RESULT,
+        )
+
+    # ---- TOOL-CALL LOOP ----
     while getattr(msg, "tool_calls", None):
         for call in msg.tool_calls:
             name = call.function.name
@@ -295,8 +317,14 @@ def run_agent(
             if not fn:
                 tool_result = {"error": f"Unknown tool {name}"}
             else:
-                tool_result = fn(user_id, args)
+                try:
+                    tool_result = fn(user_id, args)
+                except Exception as exc:
+                    tool_result = {"error": f"tool {name} failed: {exc!r}"}
+
                 used_tools.append(name)
+
+            _LAST_TOOL_RESULT = tool_result
 
             # tool call + tool result messages
             messages.append(
@@ -323,16 +351,40 @@ def run_agent(
                 }
             )
 
-        resp = _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.4,
-        )
-        msg = resp.choices[0].message
+        # ---- FOLLOW-UP LLM CALL (wrapped) ----
+        try:
+            resp = _client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.4,
+            )
+            msg = resp.choices[0].message
+        except (
+            APITimeoutError,
+            RateLimitError,
+            APIError,
+            Exception,
+        ) as exc:
+            try:
+                storage.log_agent_error(
+                    user_id, f"followup_llm_call_failed: {exc!r}")
+            except Exception:
+                pass
 
-    reply_text = (msg.content or "").strip()
+            _LAST_TOOL_RESULT = {"error": f"followup_llm_call_failed: {exc!r}"}
+            return AgentTurn(
+                reply=(
+                    "I started working on your plan but ran into a network "
+                    "issue before I could finish. Please try again."
+                ),
+                used_tools=used_tools,
+                last_tool_result=_LAST_TOOL_RESULT,
+            )
+
+    reply_text = (msg.content or "").strip(
+    ) or "I couldn't generate a response."
     return AgentTurn(
         reply=reply_text,
         used_tools=used_tools,
