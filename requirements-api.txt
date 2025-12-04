@@ -7,4 +7,6 @@ openai==1.51.2
 requests==2.32.3
 beautifulsoup4==4.12.3
 pydantic-settings>=2.2
-langgraph>=1.0.0
+langgraph>=0.2.0
+langchain-openai>=0.1.0
+

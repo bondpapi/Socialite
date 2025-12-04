@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel
 
@@ -247,12 +250,17 @@ def run_agent(
     country: Optional[str] = None,
 ) -> AgentTurn:
     """
-    Core agent loop.
-    Optionally receives city/country hints for better prompting.
+    Core agent loop, now powered by LangGraph's ReAct agent.
+
+    We:
+    - build a LangGraph ReAct agent with per-request tools (bound to user_id)
+    - invoke it with the conversation messages
+    - keep track of used tools and last tool result via closures + existing tool_* functions
     """
     global _LAST_TOOL_RESULT
     _LAST_TOOL_RESULT = {}
 
+    # Conversation messages (same structure you had before)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
@@ -274,30 +282,88 @@ def run_agent(
 
     used_tools: List[str] = []
 
-    # ---- INITIAL LLM CALL (wrapped) ----
+    # ---- LangGraph tool wrappers (capture user_id + used_tools) ----
+
+    def search_events_tool(
+        city: str,
+        country: str,
+        days_ahead: int = 30,
+        start_in_days: int = 0,
+        include_mock: bool = True,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Search events for a city/country with optional keyword filters."""
+        args: Dict[str, Any] = {
+            "city": city,
+            "country": country,
+            "days_ahead": days_ahead,
+            "start_in_days": start_in_days,
+            "include_mock": include_mock,
+            "query": query,
+        }
+        result = tool_search_events(user_id, args)
+        used_tools.append("tool_search_events")
+        return result
+
+    def save_preferences_tool(
+        home_city: Optional[str] = None,
+        home_country: Optional[str] = None,
+        passions: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Save or update user preferences (home city/country, interests)."""
+        args: Dict[str, Any] = {
+            "home_city": home_city,
+            "home_country": home_country,
+            "passions": passions,
+        }
+        result = tool_save_preferences(user_id, args)
+        used_tools.append("tool_save_preferences")
+        return result
+
+    def get_preferences_tool() -> Dict[str, Any]:
+        """Fetch stored preferences for personalization."""
+        args: Dict[str, Any] = {}
+        result = tool_get_preferences(user_id, args)
+        used_tools.append("tool_get_preferences")
+        return result
+
+    def subscribe_digest_tool(
+        frequency: str = "weekly",
+    ) -> Dict[str, Any]:
+        """Subscribe the user to periodic event digests."""
+        args: Dict[str, Any] = {"frequency": frequency}
+        result = tool_subscribe_digest(user_id, args)
+        used_tools.append("tool_subscribe_digest")
+        return result
+
+    tools = [
+        search_events_tool,
+        save_preferences_tool,
+        get_preferences_tool,
+        subscribe_digest_tool,
+    ]
+
+    # ---- Build LangGraph ReAct agent ----
     try:
-        resp = _client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.4,
+        llm = ChatOpenAI(model=model, temperature=0.4)
+        graph = create_react_agent(
+            model=llm,
+            tools=tools,
+            prompt=SYSTEM_PROMPT,
         )
-        msg = resp.choices[0].message
-    except (
-        APITimeoutError,
-        RateLimitError,
-        APIError,
-        Exception,
-    ) as exc:
-        # Optional: log somewhere if you have a storage logger
+
+        # LangGraph expects {"messages": [...]} as input
+        state = graph.invoke({"messages": messages})
+
+    except Exception as exc:
+        # Fallback behaviour if LangGraph/LLM fails
         try:
             storage.log_agent_error(
-                user_id, f"initial_llm_call_failed: {exc!r}")
+                user_id, f"langgraph_agent_failed: {exc!r}")
         except Exception:
             pass
 
-        _LAST_TOOL_RESULT = {"error": f"initial_llm_call_failed: {exc!r}"}
+        _LAST_TOOL_RESULT = {"error": f"langgraph_agent_failed: {exc!r}"}
         return AgentTurn(
             reply=(
                 "Sorry, I had trouble talking to the AI model. "
@@ -307,84 +373,17 @@ def run_agent(
             last_tool_result=_LAST_TOOL_RESULT,
         )
 
-    # ---- TOOL-CALL LOOP ----
-    while getattr(msg, "tool_calls", None):
-        for call in msg.tool_calls:
-            name = call.function.name
-            args = _safe_json_loads(call.function.arguments)
-            fn = TOOL_MAP.get(name)
+    # ---- Extract final reply from LangGraph state ----
+    msgs = state.get("messages", [])
+    if not msgs:
+        reply_text = "I couldn't generate a response."
+    else:
+        last = msgs[-1]
+        # last may be a LangChain message object or a plain dict
+        reply_text = getattr(last, "content", None) or last.get(
+            "content", "") or ""
+        reply_text = reply_text.strip() or "I couldn't generate a response."
 
-            if not fn:
-                tool_result = {"error": f"Unknown tool {name}"}
-            else:
-                try:
-                    tool_result = fn(user_id, args)
-                except Exception as exc:
-                    tool_result = {"error": f"tool {name} failed: {exc!r}"}
-
-                used_tools.append(name)
-
-            _LAST_TOOL_RESULT = tool_result
-
-            # tool call + tool result messages
-            messages.append(
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": json.dumps(args),
-                            },
-                        }
-                    ],
-                }
-            )
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": name,
-                    "content": json.dumps(tool_result),
-                }
-            )
-
-        # ---- FOLLOW-UP LLM CALL (wrapped) ----
-        try:
-            resp = _client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.4,
-            )
-            msg = resp.choices[0].message
-        except (
-            APITimeoutError,
-            RateLimitError,
-            APIError,
-            Exception,
-        ) as exc:
-            try:
-                storage.log_agent_error(
-                    user_id, f"followup_llm_call_failed: {exc!r}")
-            except Exception:
-                pass
-
-            _LAST_TOOL_RESULT = {"error": f"followup_llm_call_failed: {exc!r}"}
-            return AgentTurn(
-                reply=(
-                    "I started working on your plan but ran into a network "
-                    "issue before I could finish. Please try again."
-                ),
-                used_tools=used_tools,
-                last_tool_result=_LAST_TOOL_RESULT,
-            )
-
-    reply_text = (msg.content or "").strip(
-    ) or "I couldn't generate a response."
     return AgentTurn(
         reply=reply_text,
         used_tools=used_tools,
