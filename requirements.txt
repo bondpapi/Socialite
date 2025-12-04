@@ -24,3 +24,4 @@ streamlit==1.38.0
 pandas==2.2.2
 python-dateutil==2.9.0.post0
 tiktoken>=0.7.0         
+langgraph>=1.0.0
