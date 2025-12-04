@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
-
+from langgraph.prebuilt import create_react_agent
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel
 
-from services import storage
+from services import rag, storage
 from services.aggregator import search_events_sync
 
 _client = OpenAI(timeout=20, max_retries=1)
@@ -336,11 +335,23 @@ def run_agent(
         used_tools.append("tool_subscribe_digest")
         return result
 
+    def rag_search_tool(
+        query: str,
+        city: Optional[str] = None,
+        k: int = 5,
+    ) -> Dict[str, Any]:
+        """Look up background knowledge about cities, venues, or FAQs."""
+        hits = rag.search_knowledge(query=query, city=city, k=k)
+        used_tools.append("tool_rag_search")
+        # optionally set _LAST_TOOL_RESULT = {...}
+        return {"hits": hits}
+
     tools = [
         search_events_tool,
         save_preferences_tool,
         get_preferences_tool,
         subscribe_digest_tool,
+        rag_search_tool,
     ]
 
     # ---- Build LangGraph ReAct agent ----
