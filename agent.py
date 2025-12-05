@@ -123,6 +123,7 @@ TOOLS = [
     },
 ]
 
+
 # -------------------------------------------------
 # Shared state for last tool call
 # -------------------------------------------------
@@ -227,6 +228,7 @@ TOOL_MAP = {
     "tool_subscribe_digest": tool_subscribe_digest,
 }
 
+
 # -------------------------------------------------
 # Agent loop
 # -------------------------------------------------
@@ -266,7 +268,6 @@ def run_agent(
     global _LAST_TOOL_RESULT
     _LAST_TOOL_RESULT = {}
 
-    # Conversation messages (same structure you had before)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
@@ -350,7 +351,6 @@ def run_agent(
         """Look up background knowledge about cities, venues, or FAQs."""
         hits = rag.search_knowledge(query=query, city=city, k=k)
         used_tools.append("tool_rag_search")
-        # optionally set _LAST_TOOL_RESULT = {...}
         return {"hits": hits}
 
     tools = [
