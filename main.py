@@ -8,13 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from middleware import MetricsMiddleware
 from routers import (
-    events as events_router,
-    saved as saved_router,
-    metrics as metrics_router,
     agent as agent_router,
     auth as auth_router,
+    events as events_router,
+    metrics as metrics_router,
     profile as profile_router,
+    saved as saved_router,
 )
+from services import rag
 
 app = FastAPI(title="socialite-api", version="1.0.0")
 
@@ -51,13 +52,14 @@ async def log_requests(request: Request, call_next):
             request.headers.get("user-agent", "-"),
         )
 
+
 # Routers
-app.include_router(events_router.router)
-app.include_router(saved_router.router)
-app.include_router(metrics_router.router)
 app.include_router(agent_router.router)
 app.include_router(auth_router.router)
+app.include_router(events_router.router)
+app.include_router(metrics_router.router)
 app.include_router(profile_router.router)
+app.include_router(saved_router.router)
 
 
 @app.get("/ping")
@@ -74,7 +76,6 @@ def health():
 def root():
     return {"ok": True, "service": "socialite-api"}
 
-from services import rag
 
 @app.on_event("startup")
 def load_rag_knowledge():
