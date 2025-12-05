@@ -73,3 +73,13 @@ def health():
 @app.get("/")
 def root():
     return {"ok": True, "service": "socialite-api"}
+
+from services import rag
+
+@app.on_event("startup")
+def load_rag_knowledge():
+    try:
+        n = rag.load_from_jsonl("data/knowledge.jsonl")
+        print(f"[RAG] Loaded {n} knowledge docs")
+    except Exception as exc:
+        print(f"[RAG] Failed to load knowledge docs: {exc!r}")

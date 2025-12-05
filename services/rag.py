@@ -1,13 +1,14 @@
 
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.docstore.document import Document
 
 import json
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from langchain.docstore.document import Document
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+
 
 _store: Optional[FAISS] = None
 
@@ -114,6 +115,7 @@ def search_knowledge(
         )
 
     return results
+
 
 def load_from_jsonl(path: str) -> int:
     """
