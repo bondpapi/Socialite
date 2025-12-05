@@ -1,16 +1,17 @@
-# services/rag.py
-from __future__ import annotations
 
+from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
 
-# In-memory vector store (can be persisted later if you want)
+import json
+from pathlib import Path
+
 _store: Optional[FAISS] = None
 
-# Use a lightweight embedding model
+
 _embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
 
@@ -113,3 +114,28 @@ def search_knowledge(
         )
 
     return results
+
+def load_from_jsonl(path: str) -> int:
+    """
+    Load docs from a JSONL file and add them to the RAG store.
+
+    Returns:
+      number of documents successfully added
+    """
+    p = Path(path)
+    if not p.exists():
+        return 0
+
+    docs = []
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            docs.append(rec)
+
+    return add_documents(docs)
