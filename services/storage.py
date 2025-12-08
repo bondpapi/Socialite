@@ -77,6 +77,7 @@ with _connect() as _c:
 
 # ---------- Profiles ----------
 
+
 def get_profile(user_id: str) -> Dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute(
@@ -127,6 +128,7 @@ def upsert_profile(p: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- Saved events ----------
 
+
 def save_event(user_id: str, event: Dict[str, Any]) -> None:
     event_id = (
         event.get("id") or event.get("url") or json.dumps(event)[:64]
@@ -164,6 +166,7 @@ def clear_saved(user_id: str) -> None:
 
 # ---------- Ratings ----------
 
+
 def set_rating(user_id: str, event_id: str, rating: int) -> None:
     rating = max(1, min(5, int(rating)))
     with _connect() as conn:
@@ -176,6 +179,7 @@ def set_rating(user_id: str, event_id: str, rating: int) -> None:
 
 # ---------- Search log ----------
 
+
 def log_search(user_id: Optional[str], args: Dict[str, Any], count: int) -> None:
     with _connect() as conn:
         conn.execute("""
@@ -186,6 +190,7 @@ def log_search(user_id: Optional[str], args: Dict[str, Any], count: int) -> None
 
 
 # ---------- Digest outbox ----------
+
 
 def enqueue_digest(user_id: str, cards: List[Dict[str, Any]]) -> None:
     with _connect() as conn:
@@ -219,3 +224,29 @@ def pop_latest_digest(user_id: str) -> List[Dict[str, Any]]:
         conn.execute("DELETE FROM digests WHERE id = ?", (digest_id,))
         conn.commit()
         return items
+
+
+def log_event_search(user_id: str, params: Dict[str, Any], count: int) -> None:
+    """
+    Log an event search for analytics or future recommendations.
+
+    This is a safe no-op stub for now; can later wire it to a real
+    SQLite table if you want (e.g. event_searches).
+    """
+    # implementation if I want to persist:
+    # with get_conn() as conn:
+    #     conn.execute(
+    #         "INSERT INTO event_searches (user_id, params_json, result_count, created_at) "
+    #         "VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+    #         (user_id, json.dumps(params), count),
+    #     )
+    # For now, just ignore to avoid breaking the agent.
+    return None
+
+
+def log_agent_error(user_id: str, message: str) -> None:
+    """
+    Optionally log agent-level errors. Currently a safe no-op.
+    """
+    # Same pattern: can persist to a table or a log file later.
+    return None
