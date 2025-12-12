@@ -16,7 +16,7 @@ ENV APP_MODULE="main:app" \
 # Make sure Python can import your packages
 ENV PYTHONPATH=/app
 
-# 🚩 Let Streamlit talk to the API in the same container
+# Let Streamlit talk to the API in the same container
 ENV SOCIALITE_API=http://127.0.0.1:${API_PORT}
 
 WORKDIR /app
@@ -25,9 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   curl tini build-essential \
   && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.lock.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-  pip install --no-cache-dir -r requirements.txt
+  pip install --no-cache-dir -r requirements.lock.txt
 
 COPY . .
 
