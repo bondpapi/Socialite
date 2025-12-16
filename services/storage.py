@@ -126,6 +126,84 @@ def upsert_profile(p: Dict[str, Any]) -> Dict[str, Any]:
     return get_profile(p["user_id"]) or p
 
 
+def get_preferences(user_id: str) -> Dict[str, Any]:
+    """
+    Return a simple preferences dict for the given user_id.
+
+    Wraps whatever profile structure is available, so the
+    agent can call `tool_get_preferences` without crashing.
+
+    Expected shape:
+      {
+        "home_city": str | None,
+        "home_country": str | None,
+        "passions": list[str]
+      }
+    """
+    prefs: Dict[str, Any] = {
+        "home_city": None,
+        "home_country": None,
+        "passions": [],
+    }
+
+    try:
+        profile = get_profile(user_id)
+    except Exception:
+        profile = None
+
+    if not profile:
+        return prefs
+
+    # Handle different possible field names
+    home_city = (
+        profile.get("home_city")
+        or profile.get("city")
+    )
+    home_country = (
+        profile.get("home_country")
+        or profile.get("country")
+    )
+    passions = (
+        profile.get("passions")
+        or profile.get("interests")
+        or []
+    )
+
+    prefs["home_city"] = home_city
+    prefs["home_country"] = home_country
+    prefs["passions"] = list(passions) if passions else []
+
+    return prefs
+
+
+def save_preferences(
+    user_id: str,
+    home_city: Optional[str] = None,
+    home_country: Optional[str] = None,
+    passions: Optional[List[str]] = None,
+) -> None:
+    """
+    Save or update user preferences.
+    """
+    profile_data = {"user_id": user_id}
+    if home_city is not None:
+        profile_data["city"] = home_city
+    if home_country is not None:
+        profile_data["country"] = home_country
+    if passions is not None:
+        profile_data["passions"] = passions
+    upsert_profile(profile_data)
+
+
+def upsert_subscription(user_id: str, frequency: str = "weekly") -> None:
+    """
+    Placeholder for subscription management.
+    Currently a no-op; implement when subscription table is added.
+    """
+    # TODO: Add subscriptions table to schema
+    pass
+
+
 # ---------- Saved events ----------
 
 
