@@ -106,7 +106,8 @@ def _coerce_country(value) -> str:
     return ""
 
 
-def search_from_profile(p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
+def search_from_profile(
+        p: Dict[str, Any], include_mock: bool) -> Dict[str, Any]:
     city = (p.get("city") or "").strip()
     country = _coerce_country(p.get("country"))
 
@@ -168,11 +169,13 @@ def nav(active: str = "discover"):
         return A(label, href=href, cls=cls)
 
     return Nav(
-        H3("🎟️ Socialite"),
-        link("Discover", "/discover", "discover"),
-        link("Chat", "/chat", "chat"),
-        link("Settings", "/settings", "settings"),
-        Small(f"API: {API_BASE}", cls="ml-auto"),
+        Ul(
+            Li(link("Discover", "/discover", "discover")),
+            Li(link("Chat", "/chat", "chat")),
+            Li(link("Settings", "/settings", "settings")),
+            cls="flex gap-2",
+        ),
+        cls="ml-auto",
     )
 
 
@@ -184,17 +187,17 @@ def api_status_badge() -> Any:
 
 
 def event_card(e: Dict[str, Any], key: str, user_id: str) -> Any:
-    """Render a single event as a card."""
     title = e.get("title") or "Untitled Event"
     venue = e.get("venue_name")
     place = ", ".join([p for p in [e.get("city"), e.get("country")] if p])
-    when = e.get("start_time")
+    when = e.get("start_time") or e.get("local_date")
     category = e.get("category")
     desc = e.get("description")
     img = e.get("image_url")
     url = e.get("url")
     price = e.get("min_price")
     currency = e.get("currency") or ""
+    source = e.get("source") or e.get("provider") or ""
 
     chips = []
     if venue:
@@ -205,47 +208,87 @@ def event_card(e: Dict[str, Any], key: str, user_id: str) -> Any:
         chips.append(f"🕐 {when}")
     if category:
         chips.append(f"🏷️ {category}")
+    if source:
+        chips.append(f"🔗 {source}")
 
-    children: List[Any] = [
+    header = Div(
         H3(title),
         P(" • ".join(chips)) if chips else "",
-    ]
+        cls="card-header",
+    )
 
+    body: List[Any] = []
     if desc and desc != "Event" and len(desc.strip()) > 3:
-        short = desc[:200] + ("..." if len(desc) > 200 else "")
-        children.append(P(short))
+        short = desc[:200] + ("…" if len(desc) > 200 else "")
+        body.append(P(short))
 
     if img:
-        children.append(Img(src=img, cls="w-100"))
+        body.append(Img(src=img, cls="w-100 rounded"))
 
     buttons: List[Any] = []
     if url:
         buttons.append(
-            A(
-                "🔗 View details",
-                href=url,
-                target="_blank",
-                cls="button",
-            )
-        )
-
-    # Saving via /saved endpoint (best-effort; no UI feedback here)
-    if user_id:
-        buttons.append(
-            Form(
-                Input(type="hidden", name="event_key", value=key),
-                Input(type="hidden", name="user_id", value=user_id),
-                Button("💾 Save", type="submit"),
-                action="/save-event",
-                method="post",
-            )
+            A("View details", href=url, target="_blank", cls="button")
         )
 
     if price is not None:
-        buttons.append(P(f"💰 From {price} {currency}".strip()))
+        buttons.append(
+            Span(f"From {price} {currency}".strip(), cls="text-muted")
+        )
 
-    children.append(Div(*buttons, cls="flex gap-2 mt-2"))
-    return Article(*children, cls="card")
+    footer = Div(
+        *buttons, cls="flex gap-2 items-center justify-between mt-2"
+    )
+
+    return Article(
+        header,
+        Div(*body, cls="card-body"),
+        footer,
+        cls="card",
+    )
+
+
+def page_layout(active: str, *sections: Any):
+    """
+    Shared layout wrapper:
+    - Header with logo, tagline, nav, API status
+    - Main content
+    - Footer
+    """
+    header = Header(
+        Div(
+            Span("🎟️", cls="logo text-xxl"),
+            Div(
+                H2("Socialite"),
+                P("Your AI event concierge", cls="text-muted"),
+                cls="title",
+            ),
+            cls="flex items-center gap-3",
+        ),
+        Div(
+            api_status_badge(),
+            cls="ml-auto",
+        ),
+        nav(active),
+        cls="container flex items-center gap-3 py-2",
+    )
+
+    footer = Footer(
+        Div(
+            Small(
+                "🎟️ Socialite — Discover amazing events in your city!"
+            ),
+            cls="text-muted",
+        ),
+        cls="container py-3",
+    )
+
+    return Titled(
+        "Socialite",
+        header,
+        Main(*sections, cls="container my-3"),
+        footer,
+    )
 
 
 # Routes
@@ -264,29 +307,31 @@ def root():
 def discover(include_mock: str = "0"):
 
     include_bool = include_mock == "1"
-
     prof = load_profile(WEB_USER_ID)
 
-    body: List[Any] = [
-        nav("discover"),
-        Section(
-            H1("🏠 Discover Events"),
-            P("Browse recommended events based on your profile settings."),
-            api_status_badge(),
+    hero = Section(
+        H1("🏠 Discover Events"),
+        P(
+            "Browse recommended events based on your profile. "
+            "Tune your city, country and interests in Settings."
         ),
-    ]
+        cls="card",
+    )
+
+    sections: List[Any] = [hero]
 
     if not (prof.get("city") and prof.get("country")):
-        body.append(
+        sections.append(
             Section(
-                P("Set your Home City and Country in Settings first."),
+                H3("Set up your location"),
+                P("I need your city and country to find events for you."),
                 A("Go to Settings →", href="/settings", cls="button"),
-                cls="warning",
+                cls="card warning",
             )
         )
-        return Titled("Socialite • Discover", *body)
+        return page_layout("discover", *sections)
 
-    # Controls form
+    # Controls + params grid
     controls = Form(
         Fieldset(
             Legend("🎛️ Controls"),
@@ -302,24 +347,34 @@ def discover(include_mock: str = "0"):
         cls="card",
     )
 
-    body.append(
+    params_card = Div(
+        H3("Current search window"),
+        Ul(
+            Li(Strong("City: "), Span(prof.get("city") or "(unset)")),
+            Li(
+                Strong("Country: "),
+                Span(prof.get("country") or "(unset)")
+            ),
+            Li(
+                Strong("Days ahead: "),
+                Span(str(prof.get("days_ahead") or 120))
+            ),
+            Li(
+                Strong("Start in: "),
+                Span(f"{prof.get('start_in_days', 0)} days")
+            ),
+            Li(
+                Strong("Keywords: "),
+                Span(prof.get("keywords") or "(none)"),
+            ),
+        ),
+        cls="card",
+    )
+
+    sections.append(
         Section(
             Div(
-                Div(
-                    H2("Search parameters"),
-                    Pre(
-                        str(
-                            {
-                                "city": prof.get("city") or "(unset)",
-                                "country": prof.get("country") or "(unset)",
-                                "days_ahead": prof.get("days_ahead", 120),
-                                "start_in_days": prof.get("start_in_days", 0),
-                                "keywords": prof.get("keywords") or "(none)",
-                            }
-                        )
-                    ),
-                    cls="card",
-                ),
+                params_card,
                 controls,
                 cls="grid",
             )
@@ -331,23 +386,27 @@ def discover(include_mock: str = "0"):
     items = list(res.get("items") or [])
 
     if not items:
-        body.append(
+        sections.append(
             Section(
-                H2("No events found"),
-                P("Try widening the date window or clearing keywords."),
-                cls="info",
+                H2("No events matched your Settings"),
+                P(
+                    "Try widening the date range or clearing keywords. "
+                    "You can adjust this in Settings."
+                ),
+                cls="card info",
             )
         )
         if res.get("debug"):
-            body.append(
+            sections.append(
                 Section(
-                    H3("Diagnostics"),
-                    Pre(str(res["debug"])),
+                    Details(
+                        Summary("Diagnostics (for debugging)"),
+                        Pre(str(res["debug"])),
+                    ),
                     cls="card",
                 )
             )
     else:
-        # Sort by passion relevance (same scoring as before)
         passions = {p.lower() for p in (prof.get("passions") or [])}
 
         def score(ev: Dict[str, Any]) -> int:
@@ -367,14 +426,15 @@ def discover(include_mock: str = "0"):
             event_card(ev, f"discover_{i}", WEB_USER_ID)
             for i, ev in enumerate(items)
         ]
-        body.append(
+
+        sections.append(
             Section(
                 H2("📅 Recommended for you"),
                 Div(*cards, cls="grid"),
             )
         )
 
-    return Titled("Socialite • Discover", *body)
+    return page_layout("discover", *sections)
 
 
 # CHAT
@@ -400,18 +460,18 @@ def chat(message: str = ""):
 
         response = _post("/agent/chat", chat_payload, timeout=25)
 
-        # Network / HTTP failure
         if isinstance(response, dict) and response.get("error"):
             warning_msg = (
-                "The AI agent had trouble replying (network or timeout issue). "
+                "The AI agent had trouble replying "
+                "(network or timeout issue). "
                 "Falling back to a direct event search instead."
             )
             search_result = search_from_profile(prof, include_mock=False)
             events = search_result.get("items", [])
-
             if not events:
                 error_msg = (
-                    "I couldn't find any events. Try adjusting your settings or date range."
+                    "I couldn't find any events. "
+                    "Try adjusting your settings or date range."
                 )
         elif isinstance(response, dict):
             answer = (
@@ -422,16 +482,7 @@ def chat(message: str = ""):
         else:
             error_msg = "Unexpected response format from agent."
 
-    body: List[Any] = [
-        nav("chat"),
-        Section(
-            H1("💬 Chat with Socialite"),
-            P("Ask me about events, get recommendations, or plan your activities!"),
-            api_status_badge(),
-        ),
-    ]
-
-    # Chat form
+    # Chat input
     chat_form = Form(
         Fieldset(
             Legend("What are you looking for?"),
@@ -449,111 +500,78 @@ def chat(message: str = ""):
         method="get",
         cls="card",
     )
-    body.append(Section(chat_form))
+
+    left_column: List[Any] = [
+        H1("💬 Chat with Socialite"),
+        P(
+            "Ask me about events, get recommendations, "
+            "or plan your activities!"
+        ),
+        chat_form,
+    ]
 
     if warning_msg:
-        body.append(Section(P(warning_msg), cls="warning"))
+        left_column.append(Section(P(warning_msg), cls="card warning"))
+
+    if error_msg and not events and not answer:
+        left_column.append(Section(P(error_msg), cls="card info"))
 
     if answer:
-        body.append(Section(H2("🤖 Socialite"), P(answer), cls="card"))
+        left_column.append(
+            Section(
+                H3("🤖 Socialite"),
+                P(answer),
+                cls="card",
+            )
+        )
 
+    # Events on the right
+    right_column: List[Any] = []
     if events:
-        cards = [event_card(ev, f"chat_{i}", WEB_USER_ID)
-                 for i, ev in enumerate(events[:5])]
-        body.append(
+        cards = [
+            event_card(ev, f"chat_{i}", WEB_USER_ID)
+            for i, ev in enumerate(events[:8])
+        ]
+        right_column.append(
             Section(
                 H2("🎯 Recommended Events"),
                 Div(*cards, cls="grid"),
             )
         )
-    elif error_msg:
-        body.append(Section(P(error_msg), cls="info"))
 
     # Subscriptions area
-    body.append(Hr())
-    body.append(
-        Section(
-            H2("📬 Subscriptions"),
-            P("Subscribe for weekly digests and view your latest digest."),
-            Div(
-                Form(
-                    Button("📅 Subscribe Weekly", type="submit"),
-                    Input(type="hidden", name="action", value="subscribe"),
-                    method="post",
-                    action="/subscriptions",
-                    cls="inline",
-                ),
-                Form(
-                    Button("📧 Get Latest Digest", type="submit"),
-                    Input(type="hidden", name="action", value="digest"),
-                    method="post",
-                    action="/subscriptions",
-                    cls="inline",
-                ),
-                cls="flex gap-2",
+    subs = Section(
+        H2("📬 Subscriptions"),
+        P("Subscribe for weekly digests or pull your latest digest."),
+        Div(
+            Form(
+                Button("📅 Subscribe Weekly", type="submit"),
+                Input(type="hidden", name="action", value="subscribe"),
+                method="post",
+                action="/subscriptions",
+                cls="inline",
             ),
-        )
+            Form(
+                Button("📧 Get Latest Digest", type="submit"),
+                Input(type="hidden", name="action", value="digest"),
+                method="post",
+                action="/subscriptions",
+                cls="inline",
+            ),
+            cls="flex gap-2",
+        ),
+        cls="card",
     )
 
-    return Titled("Socialite • Chat", *body)
+    layout_grid = Section(
+        Div(
+            Div(*left_column, cls="flex flex-col gap-3"),
+            Div(*right_column, cls="flex flex-col gap-3"),
+            cls="grid",
+        ),
+    )
 
-
-# SUBSCRIPTIONS HANDLER
-
-
-@rt("/subscriptions", methods=["POST"])
-def subscriptions(action: str = ""):
-
-    prof = load_profile(WEB_USER_ID)
-    messages: List[Any] = [nav("chat"), H1("📬 Subscriptions")]
-
-    if action == "subscribe":
-        sub_payload = {
-            "user_id": WEB_USER_ID,
-            "city": prof.get("city"),
-            "country": prof.get("country"),
-            "cadence": "WEEKLY",
-            "keywords": prof.get("passions") or [],
-        }
-        result = _post("/agent/subscribe", sub_payload)
-        if isinstance(result, dict) and result.get("ok"):
-            messages.append(Section(P("✅ Subscribed!"), cls="success"))
-        else:
-            hint = (
-                result.get("hint")
-                if isinstance(result, dict)
-                else "Subscription feature coming soon!"
-            )
-            messages.append(Section(P(f"ℹ️ {hint}"), cls="info"))
-
-    elif action == "digest":
-        digest_result = _get(f"/agent/digest/{WEB_USER_ID}")
-        digest = (
-            digest_result.get("digest", [])
-            if isinstance(digest_result, dict)
-            else []
-        )
-        if digest:
-            items = []
-            for item in digest:
-                title = item.get("title", "Event")
-                note = item.get("note")
-                items.append(
-                    Div(
-                        Strong(title),
-                        P(note) if note else "",
-                        Hr(),
-                    )
-                )
-            messages.append(Section(H2("📰 Latest Digest"), *items, cls="card"))
-        else:
-            messages.append(
-                Section(P("📭 No digest available yet."), cls="info"))
-
-    else:
-        messages.append(Section(P("Unknown action"), cls="warning"))
-
-    return Titled("Socialite • Chat", *messages)
+    return page_layout("chat", layout_grid, subs)
 
 
 # SETTINGS
@@ -573,7 +591,6 @@ def settings(
 
     prof = load_profile(WEB_USER_ID)
 
-    # If not saving, prefill from profile
     if not save:
         username = username or prof.get("username") or WEB_USERNAME
         city = city or prof.get("city") or "Vilnius"
@@ -601,51 +618,58 @@ def settings(
         r = save_profile(payload)
         saved = bool(isinstance(r, dict) and r.get("ok"))
 
-    body: List[Any] = [
-        nav("settings"),
+    sections: List[Any] = [
         Section(
             H1("⚙️ Settings"),
             P("Configure your preferences for personalized recommendations."),
-            api_status_badge(),
-        ),
+            cls="card",
+        )
     ]
 
     if save:
         if saved:
-            body.append(Section(P("Saved ✅"), cls="success"))
+            sections.append(Section(P("Saved ✅"), cls="card success"))
         else:
-            body.append(Section(P("Save failed"), cls="warning"))
+            sections.append(Section(P("Save failed"), cls="card warning"))
 
     form = Form(
-        Fieldset(
-            Legend("Account"),
-            Label("Username"),
-            Input(value=username, name="username"),
-        ),
-        Fieldset(
-            Legend("Location"),
-            Label("Home City"),
-            Input(value=city, name="city"),
-            Label("Country (ISO-2)"),
-            Input(value=country, name="country"),
-        ),
-        Fieldset(
-            Legend("Search Window"),
-            Label("Days ahead"),
-            Input(type="number", value=str(days_ahead), name="days_ahead"),
-            Label("Start in (days)"),
-            Input(
-                type="number",
-                value=str(start_in_days),
-                name="start_in_days",
+        Div(
+            Fieldset(
+                Legend("Account"),
+                Label("Username"),
+                Input(value=username, name="username"),
             ),
+            Fieldset(
+                Legend("Location"),
+                Label("Home City"),
+                Input(value=city, name="city"),
+                Label("Country (ISO-2)"),
+                Input(value=country, name="country"),
+            ),
+            cls="grid",
         ),
-        Fieldset(
-            Legend("Interests"),
-            Label("Search keywords"),
-            Input(value=keywords, name="keywords"),
-            Label("Passions / interests (comma separated)"),
-            TextArea(passions, name="passions", rows=3),
+        Div(
+            Fieldset(
+                Legend("Search Window"),
+                Label("Days ahead"),
+                Input(
+                    type="number", value=str(days_ahead), name="days_ahead"
+                ),
+                Label("Start in (days)"),
+                Input(
+                    type="number",
+                    value=str(start_in_days),
+                    name="start_in_days",
+                ),
+            ),
+            Fieldset(
+                Legend("Interests"),
+                Label("Search keywords"),
+                Input(value=keywords, name="keywords"),
+                Label("Passions / interests (comma separated)"),
+                TextArea(passions, name="passions", rows=3),
+            ),
+            cls="grid",
         ),
         Input(type="hidden", name="save", value="1"),
         Button("💾 Save Settings", type="submit"),
@@ -653,8 +677,8 @@ def settings(
         cls="card",
     )
 
-    body.append(Section(form))
-    return Titled("Socialite • Settings", *body)
+    sections.append(form)
+    return page_layout("settings", *sections)
 
 
 # SAVE EVENT ENDPOINT (best-effort wrapper)
