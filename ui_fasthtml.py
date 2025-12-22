@@ -176,14 +176,14 @@ def nav(active: str = "discover"):
     )
 
 
-def api_status_badge() -> Node:
+def api_status_badge() -> Any:
     ping = _get("/")
     if isinstance(ping, dict) and ping.get("ok"):
         return Span("Connected ✅", cls="badge success")
     return Span("API Error ❌", cls="badge danger")
 
 
-def event_card(e: Dict[str, Any], key: str, user_id: str) -> Node:
+def event_card(e: Dict[str, Any], key: str, user_id: str) -> Any:
     """Render a single event as a card."""
     title = e.get("title") or "Untitled Event"
     venue = e.get("venue_name")
@@ -206,7 +206,7 @@ def event_card(e: Dict[str, Any], key: str, user_id: str) -> Node:
     if category:
         chips.append(f"🏷️ {category}")
 
-    children: List[Node] = [
+    children: List[Any] = [
         H3(title),
         P(" • ".join(chips)) if chips else "",
     ]
@@ -218,7 +218,7 @@ def event_card(e: Dict[str, Any], key: str, user_id: str) -> Node:
     if img:
         children.append(Img(src=img, cls="w-100"))
 
-    buttons: List[Node] = []
+    buttons: List[Any] = []
     if url:
         buttons.append(
             A(
@@ -267,7 +267,7 @@ def discover(include_mock: str = "0"):
 
     prof = load_profile(WEB_USER_ID)
 
-    body: List[Node] = [
+    body: List[Any] = [
         nav("discover"),
         Section(
             H1("🏠 Discover Events"),
@@ -422,7 +422,7 @@ def chat(message: str = ""):
         else:
             error_msg = "Unexpected response format from agent."
 
-    body: List[Node] = [
+    body: List[Any] = [
         nav("chat"),
         Section(
             H1("💬 Chat with Socialite"),
@@ -505,7 +505,7 @@ def chat(message: str = ""):
 def subscriptions(action: str = ""):
 
     prof = load_profile(WEB_USER_ID)
-    messages: List[Node] = [nav("chat"), H1("📬 Subscriptions")]
+    messages: List[Any] = [nav("chat"), H1("📬 Subscriptions")]
 
     if action == "subscribe":
         sub_payload = {
@@ -601,7 +601,7 @@ def settings(
         r = save_profile(payload)
         saved = bool(isinstance(r, dict) and r.get("ok"))
 
-    body: List[Node] = [
+    body: List[Any] = [
         nav("settings"),
         Section(
             H1("⚙️ Settings"),
