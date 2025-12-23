@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
 from fasthtml.common import (
@@ -11,11 +11,13 @@ from fasthtml.common import (
     Body,
     Button,
     Div,
+    Footer,
     Form,
     H1,
     H2,
     H3,
     Head,
+    Html,
     Input,
     Label,
     Link,
@@ -41,6 +43,9 @@ DEFAULT_USERNAME = "demo"
 
 # Simple requests session
 _session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(max_retries=3)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
 
 
 def _req_json(
@@ -81,18 +86,35 @@ def check_api_status() -> bool:
     return isinstance(res, dict) and bool(res.get("ok"))
 
 
-def load_profile(user_id: str) -> Dict[str, Any]:
+def load_profile(user_id: str) -> Tuple[Dict[str, Any], bool]:
+    """Return (profile, api_ok). Guarantees at least user_id + username."""
+    ok = check_api_status()
+    base = {"user_id": user_id, "username": "demo"}
+
+    if not ok:
+        return base, False
+
     res = _get(f"/profile/{user_id}")
     if isinstance(res, dict) and res.get("profile"):
-        return res["profile"]
-    return {"user_id": user_id, "username": DEFAULT_USERNAME}
+        prof = {**base, **res["profile"]}
+    else:
+        prof = base
+
+    return prof, True
 
 
-def save_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    res = _post("/profile", p)
-    if isinstance(res, dict):
-        return res
-    return {"ok": False, "error": "Unexpected response from /profile"}
+def save_profile(
+    profile: Dict[str, Any]
+) -> Tuple[Dict[str, Any], bool, str]:
+    """Try to upsert profile, return (profile, success, error_message)."""
+    res = _post("/profile", profile)
+    if not isinstance(res, dict):
+        return profile, False, "Invalid response from API"
+
+    if res.get("ok"):
+        return res.get("profile", profile), True, ""
+    else:
+        return profile, False, str(res.get("error") or "Unknown API error")
 
 
 def _coerce_country(value) -> str:
@@ -156,7 +178,9 @@ def search_from_profile(
         }
 
     items = result.get("items") or []
-    normalized_count = int(result.get("count") or result.get("total") or len(items))
+    normalized_count = int(
+        result.get("count") or result.get("total") or len(items)
+    )
     result["count"] = normalized_count
 
     dbg = result.get("debug") or {}
@@ -167,7 +191,12 @@ def search_from_profile(
 
 
 def call_agent_chat(
-    *, user_id: str, username: str, message: str, city: str | None, country: str | None
+    *,
+    user_id: str,
+    username: str,
+    message: str,
+    city: str | None,
+    country: str | None,
 ) -> Dict[str, Any]:
     payload = {
         "user_id": user_id,
@@ -193,10 +222,14 @@ def nav_bar(active: str):
         cls = "contrast" if key == active else ""
         return A(label, href=href, cls=cls)
 
+    discover_cls = "me-2" + (" contrast" if active == "discover" else "")
+    chat_cls = "me-2" + (" contrast" if active == "chat" else "")
+    settings_cls = " contrast" if active == "settings" else ""
+
     return Nav(
-        A("Discover", href="/discover", cls="me-2" + (" contrast" if active == "discover" else "")),
-        A("Chat", href="/chat", cls="me-2" + (" contrast" if active == "chat" else "")),
-        A("Settings", href="/settings", cls=(" contrast" if active == "settings" else "")),
+        A("Discover", href="/discover", cls=discover_cls),
+        A("Chat", href="/chat", cls=chat_cls),
+        A("Settings", href="/settings", cls=settings_cls),
         cls="flex gap-3 my-3",
     )
 
@@ -266,14 +299,26 @@ def page_shell(active: str, online: bool, main_content):
                 Meta(charset="utf-8"),
                 Meta(
                     name="viewport",
-                    content="width=device-width, initial-scale=1, viewport-fit=cover",
+                    content=(
+                        "width=device-width, initial-scale=1, "
+                        "viewport-fit=cover"
+                    ),
                 ),
                 # htmx + Surreal + Pico CSS
-                Script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7/dist/htmx.js"),
-                Script(src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@main/surreal.js"),
+                Script(
+                    src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7"
+                    "/dist/htmx.js"
+                ),
+                Script(
+                    src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@"
+                    "main/surreal.js"
+                ),
                 Link(
                     rel="stylesheet",
-                    href="https://cdn.jsdelivr.net/npm/@picocss/pico@latest/css/pico.min.css",
+                    href=(
+                        "https://cdn.jsdelivr.net/npm/@picocss/pico@latest/"
+                        "css/pico.min.css"
+                    ),
                 ),
                 # Simple dark background
                 Script(
@@ -294,7 +339,11 @@ def page_shell(active: str, online: bool, main_content):
                     )
                 ),
                 Footer(
-                    P("🎟️ Socialite — Discover amazing events in your city!", cls="text-small"),
+                    P(
+                        "🎟️ Socialite — Discover amazing events in "
+                        "your city!",
+                        cls="text-small",
+                    ),
                     cls="container mt-4 mb-2",
                 ),
             ),
@@ -302,11 +351,7 @@ def page_shell(active: str, online: bool, main_content):
     )
 
 
-from fasthtml.common import Html, Footer
-
-
 app, rt = fast_app()
-
 
 
 @rt("/")
@@ -333,8 +378,8 @@ def get_discover():
         main = Div(
             H2("🏠 Discover Events"),
             P(
-                "The backend API seems offline. Start the API server or check your "
-                "SOCIALITE_API setting."
+                "The backend API seems offline. Start the API server "
+                "or check your SOCIALITE_API setting."
             ),
         )
         return page_shell("discover", online, main)
@@ -363,7 +408,10 @@ def get_discover():
 
     if error:
         cards.append(
-            P(f"⚠️ There was a problem searching for events: {error}", cls="secondary")
+            P(
+                f"⚠️ There was a problem searching for events: {error}",
+                cls="secondary",
+            )
         )
     elif not items:
         cards.append(
@@ -426,15 +474,18 @@ def chat_body(
 
     blocks: List[Any] = [
         H2("💬 Chat with Socialite"),
-        P("Ask me about events, get recommendations, or plan your activities!"),
+        P(
+            "Ask me about events, get recommendations, "
+            "or plan your activities!"
+        ),
         form,
     ]
 
     if not online:
         blocks.append(
             P(
-                "The backend API seems offline, so I can't answer right now. "
-                "Try again once the API is running.",
+                "The backend API seems offline, so I can't answer "
+                "right now. Try again once the API is running.",
                 cls="secondary mt-3",
             )
         )
@@ -504,8 +555,9 @@ def post(message: str):
 
             if not res.get("ok") and res.get("error"):
                 warning = (
-                    "The AI agent had trouble replying (network or timeout issue). "
-                    "Falling back to a direct event search instead."
+                    "The AI agent had trouble replying (network or "
+                    "timeout issue). Falling back to a direct event "
+                    "search instead."
                 )
                 if city and country:
                     search_res = search_from_profile(profile, include_mock=False)
@@ -521,7 +573,12 @@ def post(message: str):
     return page_shell("chat", online, main)
 
 
-def settings_form(profile: Dict[str, Any], online: bool, saved: bool = False, error: str | None = None):
+def settings_form(
+    profile: Dict[str, Any],
+    online: bool,
+    saved: bool = False,
+    error: str | None = None,
+):
     username = profile.get("username") or DEFAULT_USERNAME
     user_id = profile.get("user_id") or DEFAULT_USER_ID
     home_city = profile.get("city") or ""
@@ -593,7 +650,10 @@ def settings_form(profile: Dict[str, Any], online: bool, saved: bool = False, er
 
     return Div(
         H2("⚙️ Settings"),
-        P("Configure your preferences for personalized recommendations."),
+        P(
+            "Configure your preferences for personalized "
+            "recommendations."
+        ),
         *msgs,
         form,
     )
@@ -638,7 +698,8 @@ def post(
     }
 
     if not online:
-        main = settings_form(profile, online, saved=False, error="API appears offline; could not save.")
+        error_msg = "API appears offline; could not save."
+        main = settings_form(profile, online, saved=False, error=error_msg)
         return page_shell("settings", online, main)
 
     res = save_profile(profile)
@@ -655,3 +716,4 @@ def post(
 if __name__ == "__main__":
     # Run with: python ui_fasthtml.py
     serve()
+
