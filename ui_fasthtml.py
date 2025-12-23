@@ -11,6 +11,7 @@ from fasthtml.common import (
     Body,
     Button,
     Div,
+    Fieldset,
     Footer,
     Form,
     H1,
@@ -20,6 +21,7 @@ from fasthtml.common import (
     Html,
     Input,
     Label,
+    Legend,
     Link,
     Main,
     Meta,
@@ -28,6 +30,8 @@ from fasthtml.common import (
     Script,
     Span,
     Strong,
+    Textarea,
+    Titled,
     Title,
     fast_app,
     serve,
@@ -46,7 +50,6 @@ _session = requests.Session()
 _adapter = requests.adapters.HTTPAdapter(max_retries=3)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
-
 
 def _req_json(
     method: str, path: str, *, timeout: int = 20, **kwargs
@@ -103,9 +106,7 @@ def load_profile(user_id: str) -> Tuple[Dict[str, Any], bool]:
     return prof, True
 
 
-def save_profile(
-    profile: Dict[str, Any]
-) -> Tuple[Dict[str, Any], bool, str]:
+def save_profile(profile: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, str]:
     """Try to upsert profile, return (profile, success, error_message)."""
     res = _post("/profile", profile)
     if not isinstance(res, dict):
@@ -178,9 +179,7 @@ def search_from_profile(
         }
 
     items = result.get("items") or []
-    normalized_count = int(
-        result.get("count") or result.get("total") or len(items)
-    )
+    normalized_count = int(result.get("count") or result.get("total") or len(items))
     result["count"] = normalized_count
 
     dbg = result.get("debug") or {}
@@ -191,12 +190,7 @@ def search_from_profile(
 
 
 def call_agent_chat(
-    *,
-    user_id: str,
-    username: str,
-    message: str,
-    city: str | None,
-    country: str | None,
+    *, user_id: str, username: str, message: str, city: str | None, country: str | None
 ) -> Dict[str, Any]:
     payload = {
         "user_id": user_id,
@@ -222,14 +216,10 @@ def nav_bar(active: str):
         cls = "contrast" if key == active else ""
         return A(label, href=href, cls=cls)
 
-    discover_cls = "me-2" + (" contrast" if active == "discover" else "")
-    chat_cls = "me-2" + (" contrast" if active == "chat" else "")
-    settings_cls = " contrast" if active == "settings" else ""
-
     return Nav(
-        A("Discover", href="/discover", cls=discover_cls),
-        A("Chat", href="/chat", cls=chat_cls),
-        A("Settings", href="/settings", cls=settings_cls),
+        A("Discover", href="/discover", cls="me-2" + (" contrast" if active == "discover" else "")),
+        A("Chat", href="/chat", cls="me-2" + (" contrast" if active == "chat" else "")),
+        A("Settings", href="/settings", cls=(" contrast" if active == "settings" else "")),
         cls="flex gap-3 my-3",
     )
 
@@ -299,26 +289,14 @@ def page_shell(active: str, online: bool, main_content):
                 Meta(charset="utf-8"),
                 Meta(
                     name="viewport",
-                    content=(
-                        "width=device-width, initial-scale=1, "
-                        "viewport-fit=cover"
-                    ),
+                    content="width=device-width, initial-scale=1, viewport-fit=cover",
                 ),
                 # htmx + Surreal + Pico CSS
-                Script(
-                    src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7"
-                    "/dist/htmx.js"
-                ),
-                Script(
-                    src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@"
-                    "main/surreal.js"
-                ),
+                Script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7/dist/htmx.js"),
+                Script(src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@main/surreal.js"),
                 Link(
                     rel="stylesheet",
-                    href=(
-                        "https://cdn.jsdelivr.net/npm/@picocss/pico@latest/"
-                        "css/pico.min.css"
-                    ),
+                    href="https://cdn.jsdelivr.net/npm/@picocss/pico@latest/css/pico.min.css",
                 ),
                 # Simple dark background
                 Script(
@@ -339,11 +317,7 @@ def page_shell(active: str, online: bool, main_content):
                     )
                 ),
                 Footer(
-                    P(
-                        "🎟️ Socialite — Discover amazing events in "
-                        "your city!",
-                        cls="text-small",
-                    ),
+                    P("🎟️ Socialite — Discover amazing events in your city!", cls="text-small"),
                     cls="container mt-4 mb-2",
                 ),
             ),
@@ -352,6 +326,32 @@ def page_shell(active: str, online: bool, main_content):
 
 
 app, rt = fast_app()
+
+
+def _layout(active: str, body: Any, api_ok: bool, message: str = ""):
+    """Simple wrapper for shared header + nav + page body."""
+    status_label = "Connected ✅" if api_ok else "Offline"
+    status_class = "badge success" if api_ok else "badge secondary"
+
+    return Titled(
+        "Socialite",
+        Main(
+            Div(
+                H1("Socialite"),
+                P("Your AI event concierge"),
+                P(status_label, cls=status_class),
+                cls="container flex items-center gap-3 py-2",
+            ),
+            Nav(
+                A("Discover", href="/discover", cls="contrast" if active == "discover" else ""),
+                A("Chat", href="/chat", cls="contrast" if active == "chat" else ""),
+                A("Settings", href="/settings", cls="contrast" if active == "settings" else ""),
+                cls="container flex gap-3",
+            ),
+            (Div(message, cls="container alert") if message else None),
+            Div(body, cls="container"),
+        ),
+    )
 
 
 @rt("/")
@@ -378,8 +378,8 @@ def get_discover():
         main = Div(
             H2("🏠 Discover Events"),
             P(
-                "The backend API seems offline. Start the API server "
-                "or check your SOCIALITE_API setting."
+                "The backend API seems offline. Start the API server or check your "
+                "SOCIALITE_API setting."
             ),
         )
         return page_shell("discover", online, main)
@@ -408,10 +408,7 @@ def get_discover():
 
     if error:
         cards.append(
-            P(
-                f"⚠️ There was a problem searching for events: {error}",
-                cls="secondary",
-            )
+            P(f"⚠️ There was a problem searching for events: {error}", cls="secondary")
         )
     elif not items:
         cards.append(
@@ -474,18 +471,15 @@ def chat_body(
 
     blocks: List[Any] = [
         H2("💬 Chat with Socialite"),
-        P(
-            "Ask me about events, get recommendations, "
-            "or plan your activities!"
-        ),
+        P("Ask me about events, get recommendations, or plan your activities!"),
         form,
     ]
 
     if not online:
         blocks.append(
             P(
-                "The backend API seems offline, so I can't answer "
-                "right now. Try again once the API is running.",
+                "The backend API seems offline, so I can't answer right now. "
+                "Try again once the API is running.",
                 cls="secondary mt-3",
             )
         )
@@ -555,9 +549,8 @@ def post(message: str):
 
             if not res.get("ok") and res.get("error"):
                 warning = (
-                    "The AI agent had trouble replying (network or "
-                    "timeout issue). Falling back to a direct event "
-                    "search instead."
+                    "The AI agent had trouble replying (network or timeout issue). "
+                    "Falling back to a direct event search instead."
                 )
                 if city and country:
                     search_res = search_from_profile(profile, include_mock=False)
@@ -573,12 +566,7 @@ def post(message: str):
     return page_shell("chat", online, main)
 
 
-def settings_form(
-    profile: Dict[str, Any],
-    online: bool,
-    saved: bool = False,
-    error: str | None = None,
-):
+def settings_form(profile: Dict[str, Any], online: bool, saved: bool = False, error: str | None = None):
     username = profile.get("username") or DEFAULT_USERNAME
     user_id = profile.get("user_id") or DEFAULT_USER_ID
     home_city = profile.get("city") or ""
@@ -650,10 +638,7 @@ def settings_form(
 
     return Div(
         H2("⚙️ Settings"),
-        P(
-            "Configure your preferences for personalized "
-            "recommendations."
-        ),
+        P("Configure your preferences for personalized recommendations."),
         *msgs,
         form,
     )
@@ -670,8 +655,8 @@ def get_settings():
     return page_shell("settings", online, main)
 
 
-@rt("/settings")
-def post(
+@rt("/settings", methods=["POST"])
+def post_settings(
     username: str,
     user_id: str,
     home_city: str,
@@ -682,6 +667,13 @@ def post(
     passions_text: str = "",
 ):
     online = check_api_status()
+    
+    passions_list = [
+        p.strip()
+        for p in (passions_text or "").split(",")
+        if p.strip()
+    ]
+    
     profile = {
         "user_id": user_id.strip() or DEFAULT_USER_ID,
         "username": username.strip() or DEFAULT_USERNAME,
@@ -690,30 +682,24 @@ def post(
         "days_ahead": int(days_ahead),
         "start_in_days": int(start_in_days),
         "keywords": (keywords or "").strip() or None,
-        "passions": [
-            p.strip()
-            for p in (passions_text or "").split(",")
-            if p.strip()
-        ],
+        "passions": passions_list,
     }
 
     if not online:
-        error_msg = "API appears offline; could not save."
-        main = settings_form(profile, online, saved=False, error=error_msg)
+        error = "API appears offline; could not save."
+        main = settings_form(profile, online, saved=False, error=error)
         return page_shell("settings", online, main)
 
-    res = save_profile(profile)
-    error = None
-    saved = False
-    if not res.get("ok"):
-        error = res.get("error") or "Unknown error"
-    else:
-        saved = True
-
-    main = settings_form(profile, online, saved=saved, error=error)
+    saved_profile, success, error_msg = save_profile(profile)
+    
+    main = settings_form(
+        saved_profile if success else profile,
+        online,
+        saved=success,
+        error=error_msg if not success else None
+    )
     return page_shell("settings", online, main)
 
 if __name__ == "__main__":
     # Run with: python ui_fasthtml.py
     serve()
-
