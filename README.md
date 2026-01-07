@@ -8,7 +8,7 @@ Socialite is an AI-powered event discovery assistant that helps you find concert
 It consists of:
 
 - A **FastAPI backend** that aggregates events from multiple providers, exposes a simple REST API, and hosts an AI agent.
-- A **Streamlit frontend** that provides a lightweight UI with:
+- A **FastHTML frontend** that provides a lightweight UI with:
   - **Discover** – personalized event feed
   - **Chat** – natural-language AI assistant
   - **Settings** – user profile & preferences
