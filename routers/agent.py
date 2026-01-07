@@ -91,11 +91,11 @@ async def _fallback_agent(req: ChatRequest) -> ChatResponse:
             result = await _agg_search_async(
                 city=city,
                 country=country,
-                days_ahead=30,
+                days_ahead=120,
                 start_in_days=0,
                 include_mock=True,
                 query=None,
-                limit=20,
+                limit=50,
                 offset=0,
             )
         except Exception as exc:
