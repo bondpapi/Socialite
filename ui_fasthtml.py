@@ -357,7 +357,6 @@ def _layout(active: str, body: Any, api_ok: bool, message: str = ""):
 @rt("/")
 def get_root():
     # Redirect root to /discover
-    # FastHTML doesn't have a dedicated Redirect component; easiest is meta refresh.
     online = check_api_status()
     main = Div(
         P("Redirecting to Discover…"),
