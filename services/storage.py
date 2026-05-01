@@ -16,6 +16,21 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
 
@@ -30,11 +45,16 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     """)
 
+    # Migration-safe additions for the FastHTML UI.
+    _add_column_if_missing(conn, "profiles", "days_ahead", "INTEGER DEFAULT 120")
+    _add_column_if_missing(conn, "profiles", "start_in_days", "INTEGER DEFAULT 0")
+    _add_column_if_missing(conn, "profiles", "keywords", "TEXT")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS saved (
         user_id TEXT,
         event_id TEXT,
-        payload  TEXT,       -- JSON event
+        payload  TEXT,
         PRIMARY KEY (user_id, event_id)
     )
     """)
@@ -53,26 +73,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts DATETIME DEFAULT CURRENT_TIMESTAMP,
         user_id TEXT,
-        args    TEXT,     -- JSON of query args
+        args    TEXT,
         count   INTEGER
     )
     """)
 
-    # digest outbox (server → client)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS digests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT,
-        payload TEXT      -- JSON list of cards
+        payload TEXT
     )
     """)
 
     conn.commit()
-
-
-# Ensure DB exists
-with _connect() as _c:
-    _init_schema(_c)
 
 
 # ---------- Profiles ----------
@@ -81,99 +95,146 @@ with _connect() as _c:
 def get_profile(user_id: str) -> Dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM profiles WHERE user_id = ?", (user_id,)).fetchone()
+            "SELECT * FROM profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
         if not row:
             return None
-        passions = json.loads(row["passions"]) if row["passions"] else []
+
+        try:
+            passions = json.loads(row["passions"]) if row["passions"] else []
+        except Exception:
+            passions = []
+
         return {
             "user_id": row["user_id"],
-            "username": row["username"],
-            "city": row["city"],
-            "country": row["country"],
+            "username": row["username"] or "demo",
+            "city": row["city"] or "",
+            "country": (row["country"] or "LT").upper()[:2],
             "passions": passions,
             "birthday": row["birthday"],
+            "days_ahead": int(row["days_ahead"] or 120),
+            "start_in_days": int(row["start_in_days"] or 0),
+            "keywords": row["keywords"],
         }
 
 
 def upsert_profile(p: Dict[str, Any]) -> Dict[str, Any]:
-    passions = json.dumps(p.get("passions") or [])
+    user_id = p["user_id"]
+
+    existing = get_profile(user_id) or {}
+
+    merged = {
+        "user_id": user_id,
+        "username": p.get("username", existing.get("username") or "demo"),
+        "city": p.get("city", existing.get("city") or ""),
+        "country": p.get("country", existing.get("country") or "LT"),
+        "passions": p.get("passions", existing.get("passions") or []),
+        "birthday": p.get("birthday", existing.get("birthday")),
+        "days_ahead": p.get("days_ahead", existing.get("days_ahead") or 120),
+        "start_in_days": p.get("start_in_days", existing.get("start_in_days") or 0),
+        "keywords": p.get("keywords", existing.get("keywords")),
+    }
+
+    merged["country"] = str(merged["country"] or "LT").strip().upper()[:2]
+
+    try:
+        merged["days_ahead"] = int(merged["days_ahead"] or 120)
+    except Exception:
+        merged["days_ahead"] = 120
+
+    try:
+        merged["start_in_days"] = int(merged["start_in_days"] or 0)
+    except Exception:
+        merged["start_in_days"] = 0
+
+    if isinstance(merged["passions"], str):
+        passions_list = [
+            x.strip() for x in merged["passions"].split(",") if x.strip()
+        ]
+    else:
+        passions_list = list(merged["passions"] or [])
+
+    passions_json = json.dumps(passions_list)
+
     with _connect() as conn:
         conn.execute(
             """
             INSERT INTO profiles (
-                user_id, username, city, country, passions, birthday
+                user_id,
+                username,
+                city,
+                country,
+                passions,
+                birthday,
+                days_ahead,
+                start_in_days,
+                keywords
             )
             VALUES (
-                :user_id, :username, :city, :country, :passions, :birthday
+                :user_id,
+                :username,
+                :city,
+                :country,
+                :passions,
+                :birthday,
+                :days_ahead,
+                :start_in_days,
+                :keywords
             )
             ON CONFLICT(user_id) DO UPDATE SET
                 username=excluded.username,
                 city=excluded.city,
                 country=excluded.country,
                 passions=excluded.passions,
-                birthday=excluded.birthday
+                birthday=excluded.birthday,
+                days_ahead=excluded.days_ahead,
+                start_in_days=excluded.start_in_days,
+                keywords=excluded.keywords
             """,
             {
-                "user_id": p["user_id"],
-                "username": p.get("username"),
-                "city": p.get("city"),
-                "country": p.get("country"),
-                "passions": passions,
-                "birthday": p.get("birthday"),
+                "user_id": merged["user_id"],
+                "username": merged["username"],
+                "city": merged["city"],
+                "country": merged["country"],
+                "passions": passions_json,
+                "birthday": merged["birthday"],
+                "days_ahead": merged["days_ahead"],
+                "start_in_days": merged["start_in_days"],
+                "keywords": merged["keywords"],
             },
         )
         conn.commit()
-    return get_profile(p["user_id"]) or p
+
+    return get_profile(user_id) or merged
 
 
 def get_preferences(user_id: str) -> Dict[str, Any]:
-    """
-    Return a simple preferences dict for the given user_id.
-
-    Wraps whatever profile structure is available, so the
-    agent can call `tool_get_preferences` without crashing.
-
-    Expected shape:
-      {
-        "home_city": str | None,
-        "home_country": str | None,
-        "passions": list[str]
-      }
-    """
-    prefs: Dict[str, Any] = {
-        "home_city": None,
-        "home_country": None,
-        "passions": [],
-    }
-
-    try:
-        profile = get_profile(user_id)
-    except Exception:
-        profile = None
+    profile = get_profile(user_id)
 
     if not profile:
-        return prefs
+        return {
+            "home_city": None,
+            "home_country": None,
+            "city": None,
+            "country": None,
+            "passions": [],
+            "days_ahead": 120,
+            "start_in_days": 0,
+            "keywords": None,
+        }
 
-    # Handle different possible field names
-    home_city = (
-        profile.get("home_city")
-        or profile.get("city")
-    )
-    home_country = (
-        profile.get("home_country")
-        or profile.get("country")
-    )
-    passions = (
-        profile.get("passions")
-        or profile.get("interests")
-        or []
-    )
-
-    prefs["home_city"] = home_city
-    prefs["home_country"] = home_country
-    prefs["passions"] = list(passions) if passions else []
-
-    return prefs
+    return {
+        "home_city": profile.get("city"),
+        "home_country": profile.get("country"),
+        "city": profile.get("city"),
+        "country": profile.get("country"),
+        "passions": profile.get("passions") or [],
+        "days_ahead": profile.get("days_ahead") or 120,
+        "start_in_days": profile.get("start_in_days") or 0,
+        "keywords": profile.get("keywords"),
+    }
 
 
 def save_preferences(
@@ -183,15 +244,20 @@ def save_preferences(
     passions: Optional[List[str]] = None,
 ) -> None:
     """
-    Save or update user preferences.
+    Compatibility helper for the older agent preference tools.
+    Preserves existing profile values.
     """
-    profile_data = {"user_id": user_id}
+    profile_data: Dict[str, Any] = {"user_id": user_id}
+
     if home_city is not None:
         profile_data["city"] = home_city
+
     if home_country is not None:
         profile_data["country"] = home_country
+
     if passions is not None:
         profile_data["passions"] = passions
+
     upsert_profile(profile_data)
 
 
