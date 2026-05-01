@@ -368,7 +368,7 @@ def get_root():
 @rt("/discover")
 def get_discover():
     online = check_api_status()
-    profile = load_profile(DEFAULT_USER_ID) if online else {
+    profile, online = load_profile(DEFAULT_USER_ID) if online else {
         "user_id": DEFAULT_USER_ID,
         "username": DEFAULT_USERNAME,
     }
@@ -506,7 +506,7 @@ def chat_body(
 @rt("/chat")
 def get_chat():
     online = check_api_status()
-    profile = load_profile(DEFAULT_USER_ID) if online else {
+    profile, online = load_profile(DEFAULT_USER_ID) if online else {
         "user_id": DEFAULT_USER_ID,
         "username": DEFAULT_USERNAME,
     }
@@ -518,7 +518,7 @@ def get_chat():
 def post(message: str):
     # Handle chat form submission
     online = check_api_status()
-    profile = load_profile(DEFAULT_USER_ID) if online else {
+    profile, online = load_profile(DEFAULT_USER_ID) if online else {
         "user_id": DEFAULT_USER_ID,
         "username": DEFAULT_USERNAME,
     }
@@ -646,7 +646,7 @@ def settings_form(profile: Dict[str, Any], online: bool, saved: bool = False, er
 @rt("/settings")
 def get_settings():
     online = check_api_status()
-    profile = load_profile(DEFAULT_USER_ID) if online else {
+    profile, online = load_profile(DEFAULT_USER_ID) if online else {
         "user_id": DEFAULT_USER_ID,
         "username": DEFAULT_USERNAME,
     }
