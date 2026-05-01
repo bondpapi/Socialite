@@ -93,20 +93,38 @@ def normalize_profile(data: Optional[Dict[str, Any]], user_id: Optional[str] = N
 
 @router.get("/{user_id}")
 def get_profile(user_id: str) -> Dict[str, Any]:
+    default_profile = {
+        "user_id": user_id,
+        "username": "demo",
+        "city": "",
+        "country": "LT",
+        "days_ahead": 120,
+        "start_in_days": 0,
+        "keywords": None,
+        "passions": [],
+    }
+
     if _storage and hasattr(_storage, "get_profile"):
         try:
             prof = _storage.get_profile(user_id)
-            return {"ok": True, "profile": normalize_profile(prof, user_id=user_id)}
+
+            if not prof:
+                prof = default_profile
+            else:
+                prof = {**default_profile, **prof}
+
+            return {"ok": True, "profile": prof}
+
         except Exception as e:
             return {
                 "ok": False,
-                "profile": normalize_profile({"user_id": user_id}, user_id=user_id),
+                "profile": default_profile,
                 "error": str(e),
             }
 
     return {
         "ok": True,
-        "profile": normalize_profile({"user_id": user_id}, user_id=user_id),
+        "profile": default_profile,
         "debug": {"storage": "not_configured"},
     }
 
