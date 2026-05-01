@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time as _t
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,18 @@ from routers import (
 )
 from services import rag
 
-app = FastAPI(title="socialite-api", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        n = rag.load_from_jsonl("data/knowledge.jsonl")
+        print(f"[RAG] Loaded {n} knowledge docs")
+    except Exception as exc:
+        print(f"[RAG] Failed to load knowledge docs: {exc!r}")
+    yield
+
+
+app = FastAPI(title="socialite-api", version="1.0.0", lifespan=lifespan)
 
 # CORS (adjust origins as needed)
 app.add_middleware(
@@ -75,12 +87,3 @@ def health():
 @app.get("/")
 def root():
     return {"ok": True, "service": "socialite-api"}
-
-
-@app.on_event("startup")
-def load_rag_knowledge():
-    try:
-        n = rag.load_from_jsonl("data/knowledge.jsonl")
-        print(f"[RAG] Loaded {n} knowledge docs")
-    except Exception as exc:
-        print(f"[RAG] Failed to load knowledge docs: {exc!r}")
