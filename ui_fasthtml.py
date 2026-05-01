@@ -90,18 +90,34 @@ def check_api_status() -> bool:
 
 
 def load_profile(user_id: str) -> Tuple[Dict[str, Any], bool]:
-    """Return (profile, api_ok). Guarantees at least user_id + username."""
+    """Return (profile, api_ok). Guarantees usable defaults."""
     ok = check_api_status()
-    base = {"user_id": user_id, "username": "demo"}
+
+    base = {
+        "user_id": user_id,
+        "username": DEFAULT_USERNAME,
+        "city": "",
+        "country": "LT",
+        "days_ahead": 120,
+        "start_in_days": 0,
+        "keywords": None,
+        "passions": [],
+    }
 
     if not ok:
         return base, False
 
     res = _get(f"/profile/{user_id}")
-    if isinstance(res, dict) and res.get("profile"):
+
+    if isinstance(res, dict) and isinstance(res.get("profile"), dict):
         prof = {**base, **res["profile"]}
+    elif isinstance(res, dict) and res.get("user_id"):
+        prof = {**base, **res}
     else:
         prof = base
+
+    prof["country"] = _coerce_country(prof.get("country")) or "LT"
+    prof["passions"] = prof.get("passions") or []
 
     return prof, True
 
@@ -367,11 +383,7 @@ def get_root():
 
 @rt("/discover")
 def get_discover():
-    online = check_api_status()
-    profile, online = load_profile(DEFAULT_USER_ID) if online else {
-        "user_id": DEFAULT_USER_ID,
-        "username": DEFAULT_USERNAME,
-    }
+    profile, online = load_profile(DEFAULT_USER_ID)
 
     if not online:
         main = Div(
@@ -384,7 +396,7 @@ def get_discover():
         return page_shell("discover", online, main)
 
     city = (profile.get("city") or "").strip()
-    country = (profile.get("country") or "").strip()
+    country = _coerce_country(profile.get("country"))
 
     if not city or not country:
         main = Div(
@@ -399,7 +411,7 @@ def get_discover():
         )
         return page_shell("discover", online, main)
 
-    res = search_from_profile(profile, include_mock=False)
+    res = search_from_profile(profile, include_mock=True)
     items = list(res.get("items") or [])
     error = res.get("error") if not res.get("ok") else None
 
@@ -413,7 +425,7 @@ def get_discover():
         cards.append(
             P(
                 "No events matched your current settings. Try widening the "
-                "date window or clearing your keywords in Settings.",
+                "date window, enabling mock events, or clearing your keywords in Settings.",
                 cls="secondary",
             )
         )
@@ -437,7 +449,7 @@ def get_discover():
     main = Div(
         H2("🏠 Discover Events"),
         P(
-            "Browse recommended events based on your profile. "
+            f"Showing events for {city}, {country}. "
             "Tune your city, country and interests in Settings.",
             cls="secondary",
         ),
@@ -505,23 +517,14 @@ def chat_body(
 
 @rt("/chat")
 def get_chat():
-    online = check_api_status()
-    profile, online = load_profile(DEFAULT_USER_ID) if online else {
-        "user_id": DEFAULT_USER_ID,
-        "username": DEFAULT_USERNAME,
-    }
+    profile, online = load_profile(DEFAULT_USER_ID)
     main = chat_body(profile, online)
     return page_shell("chat", online, main)
 
 
 @rt("/chat")
 def post(message: str):
-    # Handle chat form submission
-    online = check_api_status()
-    profile, online = load_profile(DEFAULT_USER_ID) if online else {
-        "user_id": DEFAULT_USER_ID,
-        "username": DEFAULT_USERNAME,
-    }
+    profile, online = load_profile(DEFAULT_USER_ID)
 
     answer = None
     events: List[Dict[str, Any]] = []
@@ -537,7 +540,8 @@ def post(message: str):
             warning = "Please type a message before sending."
         else:
             city = profile.get("city")
-            country = profile.get("country")
+            country = _coerce_country(profile.get("country"))
+
             res = call_agent_chat(
                 user_id=profile.get("user_id") or DEFAULT_USER_ID,
                 username=profile.get("username") or DEFAULT_USERNAME,
@@ -548,20 +552,35 @@ def post(message: str):
 
             if not res.get("ok") and res.get("error"):
                 warning = (
-                    "The AI agent had trouble replying (network or timeout issue). "
+                    "The AI agent had trouble replying. "
                     "Falling back to a direct event search instead."
                 )
                 if city and country:
-                    search_res = search_from_profile(profile, include_mock=False)
+                    search_res = search_from_profile(profile, include_mock=True)
                     if isinstance(search_res, dict):
                         events = list(search_res.get("items") or [])[:5]
             else:
-                answer = (res.get("answer") or "").strip() or (
-                    "I'm not sure how to help with that."
-                )
-                events = list(res.get("items") or [])[:5]
+                answer = (
+                    res.get("answer")
+                    or res.get("reply")
+                    or res.get("message")
+                    or ""
+                ).strip() or "I'm not sure how to help with that."
 
-    main = chat_body(profile, online, message=message, answer=answer, events=events, warning=warning)
+                events = list(
+                    res.get("items")
+                    or res.get("events")
+                    or []
+                )[:5]
+
+    main = chat_body(
+        profile,
+        online,
+        message=message,
+        answer=answer,
+        events=events,
+        warning=warning,
+    )
     return page_shell("chat", online, main)
 
 
@@ -645,11 +664,7 @@ def settings_form(profile: Dict[str, Any], online: bool, saved: bool = False, er
 
 @rt("/settings")
 def get_settings():
-    online = check_api_status()
-    profile, online = load_profile(DEFAULT_USER_ID) if online else {
-        "user_id": DEFAULT_USER_ID,
-        "username": DEFAULT_USERNAME,
-    }
+    profile, online = load_profile(DEFAULT_USER_ID)
     main = settings_form(profile, online)
     return page_shell("settings", online, main)
 
