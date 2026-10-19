@@ -17,20 +17,18 @@ router = APIRouter(prefix="/events", tags=["events"])
 
 # ---------- Responses ----------
 
-
 class ProvidersResponse(BaseModel):
     providers: List[Dict[str, str]] = Field(default_factory=list)
     discovery: Optional[Dict[str, Any]] = None
 
-
 class EventsResponse(BaseModel):
+    ok: bool = True
     city: str = Field(..., description="City used for search")
     country: str = Field(..., description="ISO-2 country code used for search")
     count: int
     items: List[EventOut]
     errors: List[str] = Field(default_factory=list)
     debug: Optional[Dict[str, Any]] = None
-
 
 # ---------- Routes ----------
 
@@ -99,7 +97,6 @@ async def search(
                 status_code=422, detail="country must be ISO-2 code"
             )
 
-        # IMPORTANT: await the aggregator (it fan-outs to providers)
         agg_payload = await agg_search_events(
             city=city_clean,
             country=country_clean,

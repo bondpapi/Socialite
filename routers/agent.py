@@ -9,10 +9,10 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Try to import root agent: agent.py in project root
+
 _root_agent = None
 try:
-    import agent as _root_agent  # type: ignore
+    import agent as _root_agent
 except Exception:
     _root_agent = None
 
@@ -20,7 +20,7 @@ except Exception:
 try:
     from services.aggregator import search_events as _agg_search_async
 except Exception:
-    _agg_search_async = None  # type: ignore
+    _agg_search_async = None
 
 
 # ---------- Models ----------

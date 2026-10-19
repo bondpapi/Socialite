@@ -22,7 +22,7 @@ if "username" not in st.session_state:
     st.session_state.username = "demo"
 
 
-# HTTP helpers (with retries)
+# HTTP helpers enabled retries
 
 _session = requests.Session()
 _retry = Retry(
