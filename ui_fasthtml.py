@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
+from routers import _coerce_country
 
 import requests
 from fasthtml.common import (
