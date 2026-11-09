@@ -9,9 +9,12 @@ router = APIRouter(prefix="/notify", tags=["notify"])
 
 _notifier = None
 try:
-    from services import notify as _notifier
+    from ..services import notify as _notifier
 except Exception:
-    pass
+    try:
+        from services import notify as _notifier
+    except Exception:
+        pass
 
 
 class NotifyRequest(BaseModel):

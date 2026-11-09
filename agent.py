@@ -8,8 +8,8 @@ from langgraph.prebuilt import create_react_agent
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
-from services import rag, storage
-from services.aggregator import search_events_sync
+from .services import rag, storage
+from .services.aggregator import search_events_sync
 
 _client = OpenAI(timeout=20, max_retries=1)
 
@@ -261,9 +261,14 @@ TOOL_MAP = {
 
 
 class AgentTurn(BaseModel):
-    reply: str
-    used_tools: List[str] = []
+    ok: bool = True
+    answer: str = ""
+    reply: str = ""
+    used_tools: List[str] = Field(default_factory=list)
+    items: List[Dict[str, Any]] = Field(default_factory=list)
     last_tool_result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    debug: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
@@ -273,6 +278,7 @@ def _safe_json_loads(s: Optional[str]) -> Dict[str, Any]:
         return json.loads(s)
     except Exception:
         return {}
+
 
 def _coerce_country(value: Any) -> str:
     if isinstance(value, str):
@@ -394,6 +400,7 @@ def _format_events_fallback(items: List[Dict[str, Any]], city: str) -> str:
         lines.append(line)
 
     return "\n".join(lines)
+
 
 def run_agent(
     user_id: str,
@@ -523,7 +530,8 @@ def run_agent(
         k: int = 5,
     ) -> Dict[str, Any]:
         """Look up background knowledge about cities, venues, or FAQs."""
-        hits = rag.search_knowledge(query=query, city=city or profile["city"], k=k)
+        hits = rag.search_knowledge(
+            query=query, city=city or profile["city"], k=k)
         used_tools.append("tool_rag_search")
         return {"hits": hits}
 
@@ -571,7 +579,8 @@ def run_agent(
             )
             fallback_items = fallback_result.get("items") or []
 
-        fallback_answer = _format_events_fallback(fallback_items, profile["city"])
+        fallback_answer = _format_events_fallback(
+            fallback_items, profile["city"])
 
         _LAST_TOOL_RESULT = {
             "error": f"langgraph_agent_failed: {exc!r}",
@@ -582,7 +591,8 @@ def run_agent(
             ok=False,
             answer=fallback_answer,
             reply=fallback_answer,
-            used_tools=used_tools + (["fallback_search"] if fallback_items else []),
+            used_tools=used_tools +
+            (["fallback_search"] if fallback_items else []),
             items=fallback_items[:10],
             last_tool_result=_LAST_TOOL_RESULT,
             error=f"langgraph_agent_failed: {exc!r}",
@@ -603,7 +613,8 @@ def run_agent(
         if reply_text is None and isinstance(last, dict):
             reply_text = last.get("content", "")
 
-        reply_text = (reply_text or "").strip() or "I couldn't generate a response."
+        reply_text = (reply_text or "").strip(
+        ) or "I couldn't generate a response."
 
     last_result = _LAST_TOOL_RESULT or {}
     items = last_result.get("items") or []
@@ -624,7 +635,7 @@ def run_agent(
         },
     )
 
-    
+
 def chat(
     *,
     user_id: str,
@@ -656,8 +667,8 @@ def chat(
     items = last.get("items") or []
 
     return {
-        "ok": True,
-        "answer": turn.reply,
+        "ok": bool(turn.ok),
+        "answer": turn.answer or turn.reply,
         "items": items,
         "used_tools": turn.used_tools,
         "debug": {

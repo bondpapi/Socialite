@@ -12,9 +12,12 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 _root_agent = None
 try:
-    import agent as _root_agent
+    from .. import agent as _root_agent
 except Exception:
-    _root_agent = None
+    try:
+        import agent as _root_agent  # backwards compatibility for flat imports
+    except Exception:
+        _root_agent = None
 
 # Async search fallback
 try:

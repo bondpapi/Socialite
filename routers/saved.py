@@ -9,9 +9,12 @@ router = APIRouter(prefix="/saved", tags=["saved"])
 
 _storage = None
 try:
-    from services import storage as _storage
+    from ..services import storage as _storage
 except Exception:
-    pass
+    try:
+        from services import storage as _storage
+    except Exception:
+        pass
 
 
 class SaveRequest(BaseModel):

@@ -37,6 +37,11 @@ from fasthtml.common import (
     serve,
 )
 
+try:
+    from .common import build_search_params, coerce_country, normalize_profile
+except ImportError:  # pragma: no cover
+    from common import build_search_params, coerce_country, normalize_profile
+
 
 API = os.getenv(
     "SOCIALITE_API", "https://socialite-7wkx.onrender.com"
@@ -50,6 +55,7 @@ _session = requests.Session()
 _adapter = requests.adapters.HTTPAdapter(max_retries=3)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
+
 
 def _req_json(
     method: str, path: str, *, timeout: int = 20, **kwargs
@@ -93,16 +99,8 @@ def load_profile(user_id: str) -> Tuple[Dict[str, Any], bool]:
     """Return (profile, api_ok). Guarantees usable defaults."""
     ok = check_api_status()
 
-    base = {
-        "user_id": user_id,
-        "username": DEFAULT_USERNAME,
-        "city": "",
-        "country": "LT",
-        "days_ahead": 120,
-        "start_in_days": 0,
-        "keywords": None,
-        "passions": [],
-    }
+    base = normalize_profile(
+        {"user_id": user_id, "username": DEFAULT_USERNAME})
 
     if not ok:
         return base, False
@@ -110,14 +108,11 @@ def load_profile(user_id: str) -> Tuple[Dict[str, Any], bool]:
     res = _get(f"/profile/{user_id}")
 
     if isinstance(res, dict) and isinstance(res.get("profile"), dict):
-        prof = {**base, **res["profile"]}
+        prof = normalize_profile({**base, **res["profile"]}, user_id=user_id)
     elif isinstance(res, dict) and res.get("user_id"):
-        prof = {**base, **res}
+        prof = normalize_profile({**base, **res}, user_id=user_id)
     else:
         prof = base
-
-    prof["country"] = _coerce_country(prof.get("country")) or "LT"
-    prof["passions"] = prof.get("passions") or []
 
     return prof, True
 
@@ -134,26 +129,12 @@ def save_profile(profile: Dict[str, Any]) -> Tuple[Dict[str, Any], bool, str]:
         return profile, False, str(res.get("error") or "Unknown API error")
 
 
-def _coerce_country(value) -> str:
-    """Convert various country formats to ISO-2 uppercase string."""
-    if isinstance(value, str):
-        return value.strip().upper()[:2]
-    if isinstance(value, dict):
-        for k in ("code", "alpha2", "alpha_2", "countryCode"):
-            v = value.get(k)
-            if v:
-                return str(v).strip().upper()[:2]
-        name = value.get("name")
-        if name:
-            return str(name).strip().upper()[:2]
-    return ""
-
-
 def search_from_profile(
     p: Dict[str, Any], include_mock: bool
 ) -> Dict[str, Any]:
-    city = (p.get("city") or "").strip()
-    country = _coerce_country(p.get("country"))
+    normalized = normalize_profile(p)
+    city = (normalized.get("city") or "").strip()
+    country = coerce_country(normalized.get("country"))
 
     if not city or not country:
         return {
@@ -168,21 +149,20 @@ def search_from_profile(
             },
         }
 
-    days_ahead = int(p.get("days_ahead") or 90)
-    start_in_days = int(p.get("start_in_days") or 0)
-
-    params: Dict[str, Any] = {
-        "city": city,
-        "country": country,
-        "days_ahead": days_ahead,
-        "start_in_days": start_in_days,
-        "include_mock": bool(include_mock),
-        "limit": 20,
-    }
-
-    q = (p.get("keywords") or "").strip()
-    if q:
-        params["query"] = q
+    params = build_search_params(
+        normalized, include_mock=include_mock, limit=20)
+    if not params:
+        return {
+            "ok": False,
+            "count": 0,
+            "items": [],
+            "debug": {
+                "reason": "invalid_location",
+                "city": city,
+                "country_raw": p.get("country"),
+                "country_coerced": country,
+            },
+        }
 
     result = _get("/events/search", **params)
 
@@ -195,7 +175,8 @@ def search_from_profile(
         }
 
     items = result.get("items") or []
-    normalized_count = int(result.get("count") or result.get("total") or len(items))
+    normalized_count = int(result.get(
+        "count") or result.get("total") or len(items))
     result["count"] = normalized_count
 
     dbg = result.get("debug") or {}
@@ -233,9 +214,12 @@ def nav_bar(active: str):
         return A(label, href=href, cls=cls)
 
     return Nav(
-        A("Discover", href="/discover", cls="me-2" + (" contrast" if active == "discover" else "")),
-        A("Chat", href="/chat", cls="me-2" + (" contrast" if active == "chat" else "")),
-        A("Settings", href="/settings", cls=(" contrast" if active == "settings" else "")),
+        A("Discover", href="/discover", cls="me-2" +
+          (" contrast" if active == "discover" else "")),
+        A("Chat", href="/chat", cls="me-2" +
+          (" contrast" if active == "chat" else "")),
+        A("Settings", href="/settings",
+          cls=(" contrast" if active == "settings" else "")),
         cls="flex gap-3 my-3",
     )
 
@@ -309,7 +293,8 @@ def page_shell(active: str, online: bool, main_content):
                 ),
                 # htmx + Surreal + Pico CSS
                 Script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.7/dist/htmx.js"),
-                Script(src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@main/surreal.js"),
+                Script(
+                    src="https://cdn.jsdelivr.net/gh/answerdotai/surreal@main/surreal.js"),
                 Link(
                     rel="stylesheet",
                     href="https://cdn.jsdelivr.net/npm/@picocss/pico@latest/css/pico.min.css",
@@ -333,7 +318,8 @@ def page_shell(active: str, online: bool, main_content):
                     )
                 ),
                 Footer(
-                    P("🎟️ Socialite — Discover amazing events in your city!", cls="text-small"),
+                    P("🎟️ Socialite — Discover amazing events in your city!",
+                      cls="text-small"),
                     cls="container mt-4 mb-2",
                 ),
             ),
@@ -359,9 +345,11 @@ def _layout(active: str, body: Any, api_ok: bool, message: str = ""):
                 cls="container flex items-center gap-3 py-2",
             ),
             Nav(
-                A("Discover", href="/discover", cls="contrast" if active == "discover" else ""),
+                A("Discover", href="/discover",
+                  cls="contrast" if active == "discover" else ""),
                 A("Chat", href="/chat", cls="contrast" if active == "chat" else ""),
-                A("Settings", href="/settings", cls="contrast" if active == "settings" else ""),
+                A("Settings", href="/settings",
+                  cls="contrast" if active == "settings" else ""),
                 cls="container flex gap-3",
             ),
             (Div(message, cls="container alert") if message else None),
@@ -540,7 +528,7 @@ def post(message: str):
             warning = "Please type a message before sending."
         else:
             city = profile.get("city")
-            country = _coerce_country(profile.get("country"))
+            country = coerce_country(profile.get("country"))
 
             res = call_agent_chat(
                 user_id=profile.get("user_id") or DEFAULT_USER_ID,
@@ -556,7 +544,8 @@ def post(message: str):
                     "Falling back to a direct event search instead."
                 )
                 if city and country:
-                    search_res = search_from_profile(profile, include_mock=True)
+                    search_res = search_from_profile(
+                        profile, include_mock=True)
                     if isinstance(search_res, dict):
                         events = list(search_res.get("items") or [])[:5]
             else:
@@ -681,13 +670,13 @@ def post_settings(
     passions_text: str = "",
 ):
     online = check_api_status()
-    
+
     passions_list = [
         p.strip()
         for p in (passions_text or "").split(",")
         if p.strip()
     ]
-    
+
     profile = {
         "user_id": user_id.strip() or DEFAULT_USER_ID,
         "username": username.strip() or DEFAULT_USERNAME,
@@ -705,7 +694,7 @@ def post_settings(
         return page_shell("settings", online, main)
 
     saved_profile, success, error_msg = save_profile(profile)
-    
+
     main = settings_form(
         saved_profile if success else profile,
         online,
@@ -713,6 +702,7 @@ def post_settings(
         error=error_msg if not success else None
     )
     return page_shell("settings", online, main)
+
 
 if __name__ == "__main__":
     # Run with: python ui_fasthtml.py

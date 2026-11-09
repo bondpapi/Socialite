@@ -5,21 +5,32 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
-from schemas import EventOut
-from services.aggregator import (
-    list_provider_diagnostics as agg_diag,
-    list_providers as agg_list_providers,
-    search_events as agg_search_events,
-)
-from services.recommend import rank_events
+try:
+    from ..schemas import EventOut
+    from ..services.aggregator import (
+        list_provider_diagnostics as agg_diag,
+        list_providers as agg_list_providers,
+        search_events as agg_search_events,
+    )
+    from ..services.recommend import rank_events
+except ImportError:  # pragma: no cover
+    from schemas import EventOut
+    from services.aggregator import (
+        list_provider_diagnostics as agg_diag,
+        list_providers as agg_list_providers,
+        search_events as agg_search_events,
+    )
+    from services.recommend import rank_events
 
 router = APIRouter(prefix="/events", tags=["events"])
 
 # ---------- Responses ----------
 
+
 class ProvidersResponse(BaseModel):
     providers: List[Dict[str, str]] = Field(default_factory=list)
     discovery: Optional[Dict[str, Any]] = None
+
 
 class EventsResponse(BaseModel):
     ok: bool = True

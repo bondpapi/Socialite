@@ -7,16 +7,28 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from middleware import MetricsMiddleware
-from routers import (
-    agent as agent_router,
-    auth as auth_router,
-    events as events_router,
-    metrics as metrics_router,
-    profile as profile_router,
-    saved as saved_router,
-)
-from services import rag
+try:
+    from .middleware import MetricsMiddleware
+    from .routers import (
+        agent as agent_router,
+        auth as auth_router,
+        events as events_router,
+        metrics as metrics_router,
+        profile as profile_router,
+        saved as saved_router,
+    )
+    from .services import rag
+except ImportError:  # pragma: no cover
+    from middleware import MetricsMiddleware
+    from routers import (
+        agent as agent_router,
+        auth as auth_router,
+        events as events_router,
+        metrics as metrics_router,
+        profile as profile_router,
+        saved as saved_router,
+    )
+    from services import rag
 
 
 @asynccontextmanager
@@ -87,3 +99,10 @@ def health():
 @app.get("/")
 def root():
     return {"ok": True, "service": "socialite-api"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("social_agent_ai.main:app",
+                host="0.0.0.0", port=8000, reload=False)

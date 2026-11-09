@@ -8,10 +8,16 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from bs4 import BeautifulSoup
 
-from config import settings
-from providers.base import build_event
-from utils.cache import FileCache
-from utils.http_client import HttpClient
+try:
+    from ..config import settings
+    from ..providers.base import build_event
+    from ..utils.cache import FileCache
+    from ..utils.http_client import HttpClient
+except ImportError:  # pragma: no cover
+    from config import settings
+    from providers.base import build_event
+    from utils.cache import FileCache
+    from utils.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
 

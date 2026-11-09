@@ -4,8 +4,12 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from services import storage
-from services.aggregator import search_events
+try:
+    from .services import storage
+    from .services.aggregator import search_events
+except ImportError:  # pragma: no cover
+    from services import storage
+    from services.aggregator import search_events
 
 
 def _tick():

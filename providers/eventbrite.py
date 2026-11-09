@@ -3,8 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from providers.base import build_event, to_iso_z
-from services import http
+try:
+    from ..providers.base import build_event, to_iso_z
+    from ..services import http
+except ImportError:  # pragma: no cover
+    from providers.base import build_event, to_iso_z
+    from services import http
 
 KEY = "eventbrite"
 NAME = "Eventbrite"

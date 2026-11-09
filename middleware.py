@@ -6,7 +6,10 @@ from typing import Callable
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from services.metrics import log_http, init_metrics_tables
+try:
+    from .services.metrics import log_http, init_metrics_tables
+except ImportError:  # pragma: no cover
+    from services.metrics import log_http, init_metrics_tables
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):

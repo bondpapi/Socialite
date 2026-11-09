@@ -8,9 +8,12 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 _metrics_impl = None
 try:
-    from services import metrics as _metrics_impl  # optional
+    from ..services import metrics as _metrics_impl  # optional
 except Exception:
-    pass
+    try:
+        from services import metrics as _metrics_impl
+    except Exception:
+        pass
 
 
 @router.get("")
