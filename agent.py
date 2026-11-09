@@ -124,9 +124,7 @@ TOOLS = [
 ]
 
 
-# -------------------------------------------------
-# Shared state for last tool call
-# -------------------------------------------------
+# Shared state for last tool call result, used for agent turn debug and fallback formatting.
 
 _LAST_TOOL_RESULT: Dict[str, Any] = {}
 
@@ -255,9 +253,7 @@ TOOL_MAP = {
 }
 
 
-# -------------------------------------------------
-# Agent loop
-# -------------------------------------------------
+# Agent loop 
 
 
 class AgentTurn(BaseModel):
